@@ -24,4 +24,4 @@ begin
         regfile[rd] <= write_data;
 end
 end
-endmodule;
+endmodule

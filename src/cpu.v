@@ -1,5 +1,5 @@
- `include "reg_file.v" // Include the register file module
- `include "ALU.v"      // Include the ALU module
+// `include "reg_file.v" // Include the register file module
+// `include "ALU.v"      // Include the ALU module
 `include "definitions.v" // Add this line
 module cpu(
     input rst, clk,
