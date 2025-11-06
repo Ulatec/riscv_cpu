@@ -1,7 +1,3 @@
-//Verilog code for program memory
-//Revised version of Memory to avoid DPB generation during synthesis
-//Revised on 16/04/2025
-//Author: Prof. Subir Kr. Maity
 module progmem(
     input rst, clk,
     input [31:0] addr,
@@ -22,7 +18,7 @@ module progmem(
   always @(posedge clk)
   begin
     if(rst)
-      data_out <= 32'h00000013;
+      data_out <= 32'h00000013; // set to noop instead of 0x0
     else if(rd_strobe) //data read from memory
       data_out <= PROGMEM[mem_loc];
   end
