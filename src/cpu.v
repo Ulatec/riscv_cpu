@@ -1,8 +1,13 @@
-// `include "reg_file.v" // Include the register file module
-// `include "ALU.v"      // Include the ALU module
+ `include "reg_file.v" // Include the register file module
+ `include "ALU.v"      // Include the ALU module
 `include "definitions.v" // Add this line
 module cpu(
     input rst, clk,
+      // Instruction memory (read-only)
+  output wire [31:0] imem_addr,     // usually PC
+  input  wire [31:0] imem_rdata,
+  output wire        imem_rstrb,    // fetch enable (often 1'b1)
+
     input [31:0] mem_rdata, // Data read from memory (Instruction or Load data)
     output [31:0] mem_addr,  // Address to memory (PC for fetch, or Load/Store address)
     output [31:0] mem_wdata, // Data to write to memory (Store data)
@@ -244,6 +249,7 @@ wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM
     reg ex_mem_mem_write;
     reg ex_mem_reg_write;
     reg ex_mem_mem_to_reg;
+    reg [31:0] ex_mem_pcplus4;
     reg ex_mem_isJAL;
     reg ex_mem_isJALR;
     reg [31:0] ex_mem_branch_target;
@@ -255,7 +261,9 @@ wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM
     wire branch_taken = (is_beq && ex_mem_zero_flag) ||
                    (is_bne && !ex_mem_zero_flag) // || ... other conditions ...
                    ;
-
+reg [31:0] mem_wb_pcplus4;
+reg        mem_wb_isJAL;
+reg        mem_wb_isJALR;
     reg [31:0] mem_wb_mem_data;    // Data read from memory (if Load)
   reg [31:0] mem_wb_alu_result;  // ALU result (passed from EX/MEM)
   reg [4:0]  mem_wb_rd_addr;     // Destination register address (passed from EX/MEM)
@@ -348,6 +356,7 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
       if (rst) begin
           // PC Reset
           pc_reg            <= 32'b0;
+
           // IF/ID Reset
           if_id_instruction <= 32'h00000013; // Reset to NOP
           if_id_pcplus4     <= 32'b0;
@@ -373,6 +382,7 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
           ex_mem_zero_flag  <= 1'b0;
           ex_mem_isJAL <= 1'b0;
           ex_mem_isJALR <= 1'b0;
+          ex_mem_pcplus4   <= 32'b0;
           mem_wb_mem_data   <= 32'b0;
           ex_mem_branch_target <= 32'b0;
           ex_mem_mem_to_reg <= 1'b0;
@@ -383,6 +393,7 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
         mem_wb_rd_addr    <= 5'b0;
         mem_wb_reg_write  <= 1'b0;
         mem_wb_mem_to_reg <= 1'b0;
+        mem_wb_pcplus4   <= 32'b0;
         id_ex_isJAL <= 1'b0;
         id_ex_isJALR <= 1'b0;
         ex_mem_isBtype <= 1'b0;
@@ -441,6 +452,12 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
         mem_wb_rd_addr    <= ex_mem_rd_addr;
         mem_wb_reg_write  <= ex_mem_reg_write;
         mem_wb_mem_to_reg <= ex_mem_mem_to_reg;
+
+          // MEM/WB latches
+          ex_mem_pcplus4 <= id_ex_pcplus4;
+  mem_wb_pcplus4 <= ex_mem_pcplus4;
+  mem_wb_isJAL   <= ex_mem_isJAL;
+  mem_wb_isJALR  <= ex_mem_isJALR;
         
         id_ex_alu_in1_src <= ctrl_alu_in1_src;
         debug_id_instruction <= if_id_instruction; // Latch instruction leaving ID
@@ -501,7 +518,10 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
         cycle <= cycle + 1;
     end
   end
-
+wire [31:0] wb_data =
+  (mem_wb_isJAL | mem_wb_isJALR) ? mem_wb_pcplus4 :
+  (mem_wb_mem_to_reg           ) ? mem_wb_mem_data :
+                                   mem_wb_alu_result;
   // --- WB Stage Logic ---
   // Placeholder wires for MEM/WB outputs
   wire [4:0]  rd_wb = mem_wb_rd_addr;         // rd addr from MEM/WB reg
@@ -509,6 +529,6 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
   wire        mem_to_reg_wb = mem_wb_mem_to_reg; // MemToReg signal from MEM/WB reg
 
   // Register file write back data mux (Combinational - WB stage)
-assign write_data_to_reg = mem_wb_mem_to_reg ? mem_wb_mem_data : mem_wb_alu_result;
+assign write_data_to_reg = mem_wb_mem_to_reg ? mem_wb_mem_data : wb_data;
 
 endmodule

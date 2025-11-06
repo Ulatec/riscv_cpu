@@ -1,5 +1,5 @@
-// `include "cpu.v"
-// `include "progmem.v"
+ `include "cpu.v"
+ `include "progmem.v"
 module top(
     input rst, clk,
     output [31:0] cycle
