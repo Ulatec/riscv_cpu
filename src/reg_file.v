@@ -10,8 +10,13 @@ module reg_file(
 
 reg [31:0] regfile[0:31];//Register file with X0 to X31;
 integer i;
-assign rs1_data = (rs1 == 5'b0) ? 32'b0 :  regfile[rs1];
-assign rs2_data = (rs2 == 5'b0) ? 32'b0 :  regfile[rs2];
+assign rs1_data = (rs1 == 5'b0) ? 32'b0 :
+                  (write_en && rd == rs1) ? write_data :
+                  regfile[rs1];
+
+assign rs2_data = (rs2 == 5'b0) ? 32'b0 :
+                  (write_en && rd == rs2) ? write_data :
+                  regfile[rs2];
 always @(posedge clk)
 begin
     if(rst)begin
