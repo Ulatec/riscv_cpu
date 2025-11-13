@@ -19,3 +19,5 @@ A synthesizable, educational RISC-V RV32I core with a classic 5-stage pipeline (
 - Testbench + sample firmware
     - Includes a testbench.v for loading firmware and dumping VCD waveforms.
 
+## Firmware
+The CPU’s instruction memory is pre-loaded from `fw/firmware.mem`, a plain text file of 32-bit hex words suitable for Verilog `$readmemh`.  
