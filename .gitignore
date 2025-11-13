@@ -1,0 +1,17 @@
+# Vivado
+*.xpr
+*.jou
+*.log
+*.rpt
+*.dcp
+*.bit
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+.Xil/
+
+# OS/editor
+.DS_Store
+Thumbs.db
