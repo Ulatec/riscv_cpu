@@ -1,4 +1,4 @@
- `include "reg_file.v" // Include the register file module
+`include "reg_file.v" // Include the register file module
  `include "ALU.v"      // Include the ALU module
 `include "definitions.v" // Add this line
 module cpu(
@@ -74,7 +74,6 @@ initial begin
   // wire [3:0]  alu_op_signal;     // Replaced by id_ex_alu_op passed down pipeline
 
   // --- IF Stage ---
-  wire [31:0] instruction_from_mem = mem_rdata; // Instruction fetched this cycle
   wire [31:0] pcplus4_if = pc_reg + 4;         // PC + 4 calculated this cycle
   wire [31:0] next_pc; // Mux to select the actual next PC value
 
@@ -239,7 +238,11 @@ wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM
   // ALU Inputs Selection (Mux driven by registered alusrc_ctrl)
   wire [31:0] alu_input_b = id_ex_alusrc ? id_ex_immediate : id_ex_rs2_data;
   // Refinements needed here for LUI/AUIPC/JAL/JALR overriding alu_in1/alu_in2
-
+wire [31:0] store_rs2_forwarded;
+assign store_rs2_forwarded =
+    (ForwardStore == 2'b01) ? forward_data_wb :
+    (ForwardStore == 2'b10) ? forward_data_mem :
+                          id_ex_rs2_data;
     reg [31:0] ex_mem_alu_result;
     reg [31:0] ex_mem_rs2_data;
     reg [31:0] ex_mem_rd_addr;
@@ -301,24 +304,35 @@ assign take_branch_condition = ex_mem_isBtype && branch_taken;
 wire is_instruction_fetch = (mem_addr == pc_reg);
   // Memory Interface signals (Control needed based on EX/MEM register values)
 wire mem_access_in_mem_stage = ex_mem_mem_read || ex_mem_mem_write;
-assign mem_addr = (ex_mem_mem_read || ex_mem_mem_write) ? ex_mem_alu_result : pc_reg;
-  assign mem_rstrb = !mem_access_in_mem_stage || ex_mem_mem_read;  // Placeholder: Needs proper control (High for IF, High if id_ex_mem_read passed to MEM)
+
+// INSTRUCTION MEMORY INTERFACE (for fetch)
+assign imem_addr = pc_reg;  // Always fetch from PC
+assign imem_rstrb = 1'b1;   // Always fetching
+
+// DATA MEMORY INTERFACE (for loads/stores only)
+assign mem_addr = ex_mem_alu_result;  // Data address from ALU
+assign mem_rstrb = ex_mem_mem_read;   // Read strobe for loads
+  
+// Use instruction memory for fetches
+wire [31:0] instruction_from_mem = imem_rdata; // Get instruction from imem interface
 // Store data formatting (MEM stage)
-assign mem_wdata[ 7: 0] = ex_mem_rs2_data[7:0];
-assign mem_wdata[15: 8] = ex_mem_alu_result[0] ? ex_mem_rs2_data[7:0]  : ex_mem_rs2_data[15: 8]; // Use ex_mem_alu_result[0]
-assign mem_wdata[23:16] = ex_mem_alu_result[1] ? ex_mem_rs2_data[7:0]  : ex_mem_rs2_data[23:16]; // Use ex_mem_alu_result[1]
-assign mem_wdata[31:24] = ex_mem_alu_result[0] ? ex_mem_rs2_data[7:0]  :
-                         ex_mem_alu_result[1] ? ex_mem_rs2_data[15:8] : ex_mem_rs2_data[31:24]; // Use ex_mem_alu_result[0/1]
+// assign mem_wdata[ 7: 0] = ex_mem_rs2_data[7:0];
+// assign mem_wdata[15: 8] = ex_mem_alu_result[0] ? ex_mem_rs2_data[7:0]  : ex_mem_rs2_data[15: 8]; // Use ex_mem_alu_result[0]
+// assign mem_wdata[23:16] = ex_mem_alu_result[1] ? ex_mem_rs2_data[7:0]  : ex_mem_rs2_data[23:16]; // Use ex_mem_alu_result[1]
+// assign mem_wdata[31:24] = ex_mem_alu_result[0] ? ex_mem_rs2_data[7:0]  :
+//                          ex_mem_alu_result[1] ? ex_mem_rs2_data[15:8] : ex_mem_rs2_data[31:24]; // Use ex_mem_alu_result[0/1]
+  assign mem_wdata = ex_mem_rs2_data;
+assign mem_wstrb = ex_mem_mem_write ? 4'b1111 : 4'b0000;
 // Branch target calculation
  wire [31:0] branch_target_ex = pc_ex + id_ex_immediate;
 // Add STORE_wmask calculation in MEM stage
 //wire mem_byteAccess_mem     = (ex_mem_funct3[1:0] == 2'b00); // Already defined [cite: 193]
 //wire mem_halfwordAccess_mem = (ex_mem_funct3[1:0] == 2'b01); // Already defined [cite: 194]
-wire [3:0] STORE_wmask_mem = mem_byteAccess_mem ? (ex_mem_alu_result[1] ? (ex_mem_alu_result[0] ? 4'b1000 : 4'b0100) : (ex_mem_alu_result[0] ? 4'b0010 : 4'b0001)) :
-                            mem_halfwordAccess_mem ? (ex_mem_alu_result[1] ? 4'b1100 : 4'b0011) : 4'b1111;
+// wire [3:0] STORE_wmask_mem = mem_byteAccess_mem ? (ex_mem_alu_result[1] ? (ex_mem_alu_result[0] ? 4'b1000 : 4'b0100) : (ex_mem_alu_result[0] ? 4'b0010 : 4'b0001)) :
+//                             mem_halfwordAccess_mem ? (ex_mem_alu_result[1] ? 4'b1100 : 4'b0011) : 4'b1111;
 
 // Update mem_wstrb assignment
-assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM control signal
+//assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM control signal
   // ******** Instantiate Modules ********
   reg_file reg_file_inst (
       .clk(clk),
@@ -430,7 +444,7 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
 
           // -- Clock EX/MEM Register ---
           ex_mem_alu_result <= alu_result;
-          ex_mem_rs2_data <= rs2_data;
+          ex_mem_rs2_data <= store_rs2_forwarded;
           ex_mem_rd_addr <= id_ex_rd_addr;
           ex_mem_zero_flag  <= zero_flag;
           // Pass control signals through
@@ -447,6 +461,7 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
           ex_mem_isJAL <= id_ex_isJAL;
           ex_mem_branch_target <= branch_target_ex;
           mem_wb_mem_data   <= mem_rdata;
+
         // Pass through values from previous stage (EX/MEM)
         mem_wb_alu_result <= ex_mem_alu_result;
         mem_wb_rd_addr    <= ex_mem_rd_addr;
@@ -455,9 +470,9 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
 
           // MEM/WB latches
           ex_mem_pcplus4 <= id_ex_pcplus4;
-  mem_wb_pcplus4 <= ex_mem_pcplus4;
-  mem_wb_isJAL   <= ex_mem_isJAL;
-  mem_wb_isJALR  <= ex_mem_isJALR;
+            mem_wb_pcplus4 <= ex_mem_pcplus4;
+            mem_wb_isJAL   <= ex_mem_isJAL;
+            mem_wb_isJALR  <= ex_mem_isJALR;
         
         id_ex_alu_in1_src <= ctrl_alu_in1_src;
         debug_id_instruction <= if_id_instruction; // Latch instruction leaving ID
@@ -488,7 +503,8 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
         if (ex_mem_rd_addr == id_ex_rs1_addr) begin
             ForwardA = 2'b10; // Forward ALU result from MEM stage to ALU input A
         end
-        if (ex_mem_rd_addr == id_ex_rs2_addr) begin
+        // Only forward to ALU input B if the instruction uses rs2 for ALU (not immediate)
+        if ((ex_mem_rd_addr == id_ex_rs2_addr) && !id_ex_alusrc) begin
             ForwardB = 2'b10; // Forward ALU result from MEM stage to ALU input B
         end
     end
@@ -504,10 +520,26 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
             // Forward only if MEM stage isn't already writing to the same rs1
             ForwardA = 2'b01; // Forward Writeback data from WB stage to ALU input A
         end
-        if ((mem_wb_rd_addr == id_ex_rs2_addr) && !(ex_mem_reg_write && (ex_mem_rd_addr != 5'b0) && (ex_mem_rd_addr == id_ex_rs2_addr))) begin
+        // Only forward to ALU input B if the instruction uses rs2 for ALU (not immediate)
+        if ((mem_wb_rd_addr == id_ex_rs2_addr) && !id_ex_alusrc && !(ex_mem_reg_write && (ex_mem_rd_addr != 5'b0) && (ex_mem_rd_addr == id_ex_rs2_addr))) begin
              // Forward only if MEM stage isn't already writing to the same rs2
             ForwardB = 2'b01; // Forward Writeback data from WB stage to ALU input B
         end
+    end
+ end
+ 
+ // Separate forwarding for store data (always check rs2 for stores, regardless of alusrc)
+ reg [1:0] ForwardStore;
+ always @(*) begin
+    ForwardStore = 2'b00; // Default: no forwarding
+    
+    // Check if EX/MEM stage is writing to rs2
+    if (ex_mem_reg_write && (ex_mem_rd_addr != 5'b0) && (ex_mem_rd_addr == id_ex_rs2_addr)) begin
+        ForwardStore = 2'b10; // Forward from MEM stage
+    end
+    // Check if MEM/WB stage is writing to rs2 (lower priority than EX/MEM)
+    else if (mem_wb_reg_write && (mem_wb_rd_addr != 5'b0) && (mem_wb_rd_addr == id_ex_rs2_addr)) begin
+        ForwardStore = 2'b01; // Forward from WB stage
     end
  end
   // Cycle counter
@@ -518,17 +550,63 @@ assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM cont
         cycle <= cycle + 1;
     end
   end
-wire [31:0] wb_data =
-  (mem_wb_isJAL | mem_wb_isJALR) ? mem_wb_pcplus4 :
-  (mem_wb_mem_to_reg           ) ? mem_wb_mem_data :
-                                   mem_wb_alu_result;
-  // --- WB Stage Logic ---
-  // Placeholder wires for MEM/WB outputs
-  wire [4:0]  rd_wb = mem_wb_rd_addr;         // rd addr from MEM/WB reg
-  wire        reg_write_wb = mem_wb_reg_write;  // RegWrite signal from MEM/WB reg
-  wire        mem_to_reg_wb = mem_wb_mem_to_reg; // MemToReg signal from MEM/WB reg
+    wire [31:0] wb_data =
+    (mem_wb_isJAL | mem_wb_isJALR) ? mem_wb_pcplus4 :
+    (mem_wb_mem_to_reg           ) ? mem_wb_mem_data :
+                                    mem_wb_alu_result;
+    // --- WB Stage Logic ---
+    // Placeholder wires for MEM/WB outputs
+    wire [4:0]  rd_wb = mem_wb_rd_addr;         // rd addr from MEM/WB reg
+    wire        reg_write_wb = mem_wb_reg_write;  // RegWrite signal from MEM/WB reg
+    wire        mem_to_reg_wb = mem_wb_mem_to_reg; // MemToReg signal from MEM/WB reg
 
-  // Register file write back data mux (Combinational - WB stage)
-assign write_data_to_reg = mem_wb_mem_to_reg ? mem_wb_mem_data : wb_data;
+    // Register file write back data mux (Combinational - WB stage)
+    assign write_data_to_reg = mem_wb_mem_to_reg ? mem_wb_mem_data : wb_data;
+
+// Extended debug monitoring
+always @(posedge clk) begin
+  if (!rst && cycle >= 1 && cycle <= 9) begin
+    $display("\n========== Cycle %0d ==========", cycle);
+    $display("PC=0x%08x  next_pc=0x%08x", pc_reg, next_pc);
+    $display("\nIF/ID:");
+    $display("  instruction=0x%08x  pcplus4=0x%08x", if_id_instruction, if_id_pcplus4);
+    
+    $display("\nID (Decode):");
+    $display("  opcode=%b rd=%d rs1=%d rs2=%d funct3=%b", opcode_id, rd_id, rs1_id, rs2_id, funct3_id);
+    $display("  rs1_data=0x%08x rs2_data=0x%08x (from reg file)", rs1_data, rs2_data);
+    $display("  immediate=0x%08x", immediate_id);
+    $display("  ctrl: alu_op=%d alusrc=%b mem_read=%b mem_write=%b reg_write=%b",
+             alu_op_ctrl, alusrc_ctrl, mem_read_ctrl, mem_write_ctrl, reg_write_ctrl);
+    
+    $display("\nID/EX:");
+    $display("  rs1_data=0x%08x rs2_data=0x%08x immediate=0x%08x", 
+             id_ex_rs1_data, id_ex_rs2_data, id_ex_immediate);
+    $display("  rs1_addr=%d rs2_addr=%d rd_addr=%d", id_ex_rs1_addr, id_ex_rs2_addr, id_ex_rd_addr);
+    
+    $display("\nEX (Execute):");
+    $display("  ForwardA=%b ForwardB=%b", ForwardA, ForwardB);
+    $display("  alu_in1=0x%08x alu_in2=0x%08x", forwarded_alu_in1, forwarded_alu_in2);
+    $display("  alu_result=0x%08x zero=%b", alu_result, zero_flag);
+    
+    $display("\nEX/MEM:");
+    $display("  alu_result=0x%08x rs2_data=0x%08x rd_addr=%d", 
+             ex_mem_alu_result, ex_mem_rs2_data, ex_mem_rd_addr);
+    $display("  mem_read=%b mem_write=%b reg_write=%b mem_to_reg=%b", 
+             ex_mem_mem_read, ex_mem_mem_write, ex_mem_reg_write, ex_mem_mem_to_reg);
+    
+    $display("\nMEM:");
+    $display("  mem_addr=0x%08x mem_wdata=0x%08x mem_wstrb=%b mem_rstrb=%b",
+             mem_addr, mem_wdata, mem_wstrb, mem_rstrb);
+    
+    $display("\nMEM/WB:");
+    $display("  alu_result=0x%08x mem_data=0x%08x", mem_wb_alu_result, mem_wb_mem_data);
+    $display("  rd_addr=%d reg_write=%b mem_to_reg=%b", mem_wb_rd_addr, mem_wb_reg_write, mem_wb_mem_to_reg);
+    $display("  write_data_to_reg=0x%08x", write_data_to_reg);
+    
+    // Show register file state for x1 and x2
+    $display("\nRegister File: x0=0x%08x x1=0x%08x x2=0x%08x", 
+             reg_file_inst.regfile[0], reg_file_inst.regfile[1], reg_file_inst.regfile[2]);
+  end
+end
 
 endmodule
