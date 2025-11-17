@@ -113,8 +113,20 @@ module control_unit(
                     alusrc = (funct3[2]); // Immediate variants
                 end
             end
-            
-            // I-type arithmetic handled similarly...
+            5'b00100: begin // I-type arithmetic (ADDI, XORI, SLLI, etc.)
+                reg_write = 1'b1;
+                alusrc = 1'b1;
+                case (funct3)
+                    3'b000: alu_op = `ALU_ADD;
+                    3'b001: alu_op = `ALU_SLL;
+                    3'b010: alu_op = `ALU_SLT;
+                    3'b011: alu_op = `ALU_SLTU;
+                    3'b100: alu_op = `ALU_XOR;
+                    3'b101: alu_op = funct7[5] ? `ALU_SRA : `ALU_SRL;
+                    3'b110: alu_op = `ALU_OR;
+                    3'b111: alu_op = `ALU_AND;
+                endcase
+            end
         endcase
     end
 endmodule

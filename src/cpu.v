@@ -1,5 +1,6 @@
 `include "reg_file.v" // Include the register file module
  `include "ALU.v"      // Include the ALU module
+ `include "csr_file.v"
 `include "definitions.v" 
 `include "control_unit.v"
 module cpu(
@@ -62,6 +63,7 @@ reg [11:0] id_ex_csr_addr;   // CSR address (imm[11:0])
 reg        id_ex_is_csr;     // Is this a CSR instruction?
 reg        id_ex_is_ecall;   // Is this ECALL?
 reg        id_ex_is_ebreak;  // Is this EBREAK?
+reg        id_ex_is_csr_imm; // 
   // Store instruction type information if needed later (optional but helpful)
   reg [2:0]  id_ex_funct3;      // Pass funct3 for Load/Store byte/halfword handling
 
@@ -120,6 +122,7 @@ wire [1:0] ctrl_alu_in1_src;
 wire alusrc_ctrl, mem_read_ctrl, mem_write_ctrl;
 wire reg_write_ctrl, mem_to_reg_ctrl;
 wire is_branch_ctrl, is_jal_ctrl, is_jalr_ctrl;
+wire is_csr_ctrl, is_ecall_ctrl, is_ebreak_ctrl;  
 
 control_unit control_inst(
     .opcode(opcode_id),
@@ -137,7 +140,9 @@ control_unit control_inst(
     .is_branch(is_branch_ctrl),
     .is_jal(is_jal_ctrl),
     .is_jalr(is_jalr_ctrl)
-    
+    .is_csr(is_csr_ctrl),        // ← ADD
+    .is_ecall(is_ecall_ctrl),    // ← ADD
+    .is_ebreak(is_ebreak_ctrl)   // ← ADD
 );
 
 wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM stage
@@ -173,6 +178,23 @@ assign store_rs2_forwarded =
     (ForwardStore == 2'b01) ? forward_data_wb :
     (ForwardStore == 2'b10) ? forward_data_mem :
                           id_ex_rs2_data;
+
+wire [31:0] csr_rdata_ex;
+wire [31:0] csr_operand = id_ex_is_csr_imm ? 
+                          {27'b0, id_ex_rs1_addr} : 
+                          forwarded_alu_in1;
+                          reg [31:0] csr_wdata_computed;
+always @(*) begin
+    case (id_ex_funct3)
+        3'b001, 3'b101: csr_wdata_computed = csr_operand;              // CSRRW/CSRRWI
+        3'b010, 3'b110: csr_wdata_computed = csr_rdata_ex | csr_operand;  // CSRRS/CSRRSI
+        3'b011, 3'b111: csr_wdata_computed = csr_rdata_ex & ~csr_operand; // CSRRC/CSRRCI
+        default:        csr_wdata_computed = 32'b0;
+    endcase
+end
+wire csr_write_cond = (id_ex_funct3[1:0] == 2'b01) || (id_ex_rs1_addr != 5'b0);
+wire csr_should_write_ex = id_ex_is_csr && csr_write_cond;
+
     reg [31:0] ex_mem_alu_result;
     reg [31:0] ex_mem_rs2_data;
     reg [31:0] ex_mem_rd_addr;
@@ -337,8 +359,8 @@ assign mem_wstrb = ex_mem_mem_write ? store_byte_enables : 4'b0000;
           id_ex_reg_write   <= 1'b0;
           id_ex_mem_to_reg  <= 1'b0;
           id_ex_funct3      <= 3'b0;
-        ex_mem_alu_lt     <= 1'b0;          // ← ADD THIS LINE
-        ex_mem_alu_ltu    <= 1'b0;          // ← ADD THIS LINE
+        ex_mem_alu_lt     <= 1'b0;          
+        ex_mem_alu_ltu    <= 1'b0;          
           ex_mem_alu_result <= 32'b0;
           ex_mem_rs2_data <= 32'b0;
           ex_mem_rd_addr <= 32'b0;
@@ -360,7 +382,6 @@ assign mem_wstrb = ex_mem_mem_write ? store_byte_enables : 4'b0000;
         id_ex_isJAL <= 1'b0;
         id_ex_isJALR <= 1'b0;
         ex_mem_isBtype <= 1'b0;
-        //mem_wstrb <= 4'b0000;
         id_ex_isBtype_reg <= 1'b0;
         id_ex_alu_in1_src <= 2'b00;
         debug_id_instruction  <= 32'h00000013;
@@ -426,6 +447,8 @@ ex_mem_alu_ltu    <= alu_ltu;
             mem_wb_isJALR  <= ex_mem_isJALR;
         
         id_ex_alu_in1_src <= ctrl_alu_in1_src;
+
+        // DEBUG CLOCKING
         debug_id_instruction <= if_id_instruction; // Latch instruction leaving ID
 
           // --- Clock EX/MEM Register ---
