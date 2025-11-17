@@ -1,6 +1,7 @@
 `include "reg_file.v" // Include the register file module
  `include "ALU.v"      // Include the ALU module
-`include "definitions.v" // Add this line
+`include "definitions.v" 
+`include "control_unit.v"
 module cpu(
     input rst, clk,
       // Instruction memory (read-only)
@@ -15,12 +16,13 @@ module cpu(
     output reg [31:0] cycle, // Keep for testbench for now
     output [3:0] mem_wstrb   // Memory write strobe (byte enables)
   );
+
   reg [31:0] debug_id_instruction;  // Instruction leaving ID stage (entering EX)
   reg [31:0] debug_ex_instruction;  // Instruction leaving EX stage (entering MEM)
   reg [31:0] debug_mem_instruction; // Instruction leaving MEM stage (entering WB)
   reg [31:0] debug_wb_instruction;  // Instruction leaving WB stage
 initial begin
-      cycle = 0; // Initialize cycle counter [cite: 1779-1780]
+      cycle = 0; // Initialize cycle counter 
       // Initialize debug registers to NOP to avoid unknown state at start
       debug_id_instruction  = 32'h00000013;
       debug_ex_instruction  = 32'h00000013;
@@ -56,10 +58,10 @@ initial begin
   reg id_ex_isJAL; 
   reg id_ex_isJALR;
 
-          wire is_btype_id = (opcode_id == 5'b11000);
-          wire is_jal_id = (opcode_id == 5'b11011);
-          wire is_jalr_id = (opcode_id == 5'b11001);
-
+reg [11:0] id_ex_csr_addr;   // CSR address (imm[11:0])
+reg        id_ex_is_csr;     // Is this a CSR instruction?
+reg        id_ex_is_ecall;   // Is this ECALL?
+reg        id_ex_is_ebreak;  // Is this EBREAK?
   // Store instruction type information if needed later (optional but helpful)
   reg [2:0]  id_ex_funct3;      // Pass funct3 for Load/Store byte/halfword handling
 
@@ -90,7 +92,7 @@ initial begin
   wire [31:0] imm_s = {{21{if_id_instruction[31]}},if_id_instruction[30:25],if_id_instruction[11:7]};
   wire [31:0] imm_j = {{12{if_id_instruction[31]}},if_id_instruction[19:12],if_id_instruction[20],if_id_instruction[30:21],1'b0};
   wire [31:0] imm_u = {if_id_instruction[31],if_id_instruction[30:12],12'h000};
-
+    wire [11:0] csr_addr = if_id_instruction[31:20];  // CSR address is in imm field
   wire [31:0] alu_in1_mux;
   reg [2:0] ForwardA;
     reg [2:0] ForwardB;
@@ -110,106 +112,34 @@ initial begin
       // Default covers I-type (Load, JALR, Imm Arith)
   end
 
-  // Control Signals (Generated combinationally in ID)
-  reg [3:0] alu_op_ctrl;    // ALUOp code
-  reg       alusrc_ctrl;    // ALU input 2 select (0=reg, 1=imm)
-  reg       mem_read_ctrl;  // Memory read enable
-  reg       mem_write_ctrl; // Memory write enable
-  reg       reg_write_ctrl; // Register write enable
-  reg       mem_to_reg_ctrl;// Register write data select (0=ALU, 1=Mem)
 
-  // Control Unit Logic (Combinational)
-  always @(*) begin
-      // Default values (safe state, typically for NOP or unrecognized)
-      alu_op_ctrl    = `ALU_ADD; // Default to ADD (NOP often uses addi x0,x0,0)
-      alusrc_ctrl    = 1'b0;    // Default to using rs2_data
-      mem_read_ctrl  = 1'b0;
-      mem_write_ctrl = 1'b0;
-      reg_write_ctrl = 1'b0;
-      mem_to_reg_ctrl= 1'b0;    // Default to ALU result
-      ctrl_alu_in1_src = 2'b00;
-      case (opcode_id)
-          5'b01100: begin // R-type (ADD, SUB, XOR, OR, AND, SLL, SRL, SRA, SLT, SLTU)
-              reg_write_ctrl = 1'b1; // R-types write to registers
-              alusrc_ctrl    = 1'b0; // Use rs2_data
-              // Determine specific ALU op based on funct3/funct7
-              case (funct3_id)
-                  3'b000: alu_op_ctrl = funct7_id[5] ? `ALU_SUB : `ALU_ADD;
-                  3'b001: alu_op_ctrl = `ALU_SLL;
-                  3'b010: alu_op_ctrl = `ALU_SLT;
-                  3'b011: alu_op_ctrl = `ALU_SLTU;
-                  3'b100: alu_op_ctrl = `ALU_XOR;
-                  3'b101: alu_op_ctrl = funct7_id[5] ? `ALU_SRA : `ALU_SRL;
-                  3'b110: alu_op_ctrl = `ALU_OR;
-                  3'b111: alu_op_ctrl = `ALU_AND;
-                  default: alu_op_ctrl = `ALU_ADD; // Should not happen
-              endcase
-          end
-          5'b00100: begin // I-type (ADDI, XORI, ORI, ANDI, SLLI, SRLI, SRAI, SLTI, SLTIU, JALR)
-              reg_write_ctrl = 1'b1; // Most I-types write registers
-              alusrc_ctrl    = 1'b1; // Use immediate
-              case (funct3_id)
-                  3'b000: alu_op_ctrl = `ALU_ADD;  // ADDI, JALR (address calc)
-                  3'b001: alu_op_ctrl = `ALU_SLL;  // SLLI
-                  3'b010: alu_op_ctrl = `ALU_SLT;  // SLTI
-                  3'b011: alu_op_ctrl = `ALU_SLTU; // SLTIU
-                  3'b100: alu_op_ctrl = `ALU_XOR;  // XORI
-                  3'b101: alu_op_ctrl = funct7_id[5] ? `ALU_SRA : `ALU_SRL; // SRAI / SRLI
-                  3'b110: alu_op_ctrl = `ALU_OR;   // ORI
-                  3'b111: alu_op_ctrl = `ALU_AND;  // ANDI
-                  default: alu_op_ctrl = `ALU_ADD; // Should not happen
-              endcase
-          end
-          5'b00000: begin // I-type (Load: LB, LH, LW, LBU, LHU)
-              reg_write_ctrl = 1'b1; // Loads write registers
-              alusrc_ctrl    = 1'b1; // Use immediate for address calculation
-              mem_read_ctrl  = 1'b1; // Enable memory read
-              mem_to_reg_ctrl= 1'b1; // Data comes from memory
-              alu_op_ctrl    = `ALU_ADD; // ALU calculates address (rs1 + imm)
-              ctrl_alu_in1_src = 2'b00;
-          end
-          5'b01000: begin // S-type (Store: SB, SH, SW)
-              // No register write for stores
-              alusrc_ctrl    = 1'b1; // Use immediate for address calculation
-              mem_write_ctrl = 1'b1; // Enable memory write
-              alu_op_ctrl    = `ALU_ADD; // ALU calculates address (rs1 + imm)
-          end
-          5'b11000: begin // B-type (Branch: BEQ, BNE, BLT, BGE, BLTU, BGEU)
-              // No register write for branches
-              alusrc_ctrl    = 1'b0; // Use rs2_data for comparison
-              alu_op_ctrl    = `ALU_SUB; // ALU subtracts to set flags for comparison
-              // Branch signal generation would happen here or in EX
-          end
-          5'b01101: begin // U-type (LUI)
-              reg_write_ctrl = 1'b1;
-              alusrc_ctrl    = 1'b1; // Pass immediate through ALU (e.g., add imm to zero)
-              alu_op_ctrl    = `ALU_ADD; // Or a dedicated "Pass B" operation if ALU supports it
-              // Need to ensure ALU input A is zero for LUI
-          end
-          5'b00101: begin // U-type (AUIPC)
-              reg_write_ctrl = 1'b1;
-              alusrc_ctrl    = 1'b1; // Add immediate to PC
-              alu_op_ctrl    = `ALU_ADD;
-              // Need to ensure ALU input A is PC for AUIPC
-          end
-          5'b11011: begin // J-type (JAL)
-              reg_write_ctrl = 1'b1; // JAL writes PC+4 to rd
-              // ALU is not directly used for target calculation, PC logic handles it
-              // We can use ALU to pass PC+4 through if needed for writeback mux
-              alu_op_ctrl    = `ALU_ADD; // Use ALU to pass PC+4 (Input A=PC+4, Input B=0)
-              alusrc_ctrl    = 1'b1;    // To make Input B zero (assuming imm_j is used but input A forced to PC+4)
-              mem_to_reg_ctrl= 1'b0;    // Select ALU result (which holds PC+4)
-          end
-          5'b11001: begin // I-type (JALR) - Treated earlier, but could refine here
-              reg_write_ctrl = 1'b1; // JALR writes PC+4 to rd
-              alusrc_ctrl    = 1'b1; // Use immediate for address calculation
-              alu_op_ctrl    = `ALU_ADD; // ALU calculates target address (rs1 + imm)
-              mem_to_reg_ctrl= 1'b0;    // Select ALU result (will be PC+4 passed via ALU) - Needs refinement
-          end
-          // 5'b11100: // System instructions - ignore for now or halt
-          default: ; // Default values handle NOP or invalid instructions
-      endcase
-  end
+
+// Control signals
+wire [3:0] alu_op_ctrl;
+wire [1:0] ctrl_alu_in1_src;
+wire alusrc_ctrl, mem_read_ctrl, mem_write_ctrl;
+wire reg_write_ctrl, mem_to_reg_ctrl;
+wire is_branch_ctrl, is_jal_ctrl, is_jalr_ctrl;
+
+control_unit control_inst(
+    .opcode(opcode_id),
+    .funct3(funct3_id),
+    .funct7(funct7_id),
+    .rd(rd_id),
+    .rs1(rs1_id),
+    .alu_op(alu_op_ctrl),
+    .alu_in1_src(ctrl_alu_in1_src),
+    .alusrc(alusrc_ctrl),
+    .mem_read(mem_read_ctrl),
+    .mem_write(mem_write_ctrl),
+    .reg_write(reg_write_ctrl),
+    .mem_to_reg(mem_to_reg_ctrl),
+    .is_branch(is_branch_ctrl),
+    .is_jal(is_jal_ctrl),
+    .is_jalr(is_jalr_ctrl)
+    
+);
+
 wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM stage
  wire [31:0] forward_data_wb = write_data_to_reg; // Data source from MEM/WB stage (result of WB mux)
  // ALU Input A Mux (Handles special cases AND Forwarding)
@@ -248,6 +178,8 @@ assign store_rs2_forwarded =
     reg [31:0] ex_mem_rd_addr;
     reg [2:0] ex_mem_funct3;
     reg ex_mem_zero_flag;
+    reg ex_mem_alu_lt;              
+reg ex_mem_alu_ltu;             
     reg ex_mem_mem_read;
     reg ex_mem_mem_write;
     reg ex_mem_reg_write;
@@ -258,12 +190,20 @@ assign store_rs2_forwarded =
     reg [31:0] ex_mem_branch_target;
     reg ex_mem_isBtype;
 
-    wire is_beq = (ex_mem_funct3 == 3'b000);
-    wire is_bne = (ex_mem_funct3 == 3'b001);
+    wire is_beq  = (ex_mem_funct3 == 3'b000);  // Branch if equal
+    wire is_bne  = (ex_mem_funct3 == 3'b001);  // Branch if not equal
+    wire is_blt  = (ex_mem_funct3 == 3'b100);  // Branch if less than (signed)
+    wire is_bge  = (ex_mem_funct3 == 3'b101);  // Branch if greater/equal (signed)
+    wire is_bltu = (ex_mem_funct3 == 3'b110);  // Branch if less than (unsigned)
+    wire is_bgeu = (ex_mem_funct3 == 3'b111);  // Branch if greater/equal (unsigned)
 
-    wire branch_taken = (is_beq && ex_mem_zero_flag) ||
-                   (is_bne && !ex_mem_zero_flag) // || ... other conditions ...
-                   ;
+wire branch_taken = (is_beq  && ex_mem_zero_flag) ||   // Take if equal (zero)
+                        (is_bne  && !ex_mem_zero_flag) ||  // Take if not equal
+                        (is_blt  && ex_mem_alu_lt) ||       // Take if less than (signed)
+                        (is_bge  && !ex_mem_alu_lt) ||      // Take if greater/equal (signed)
+                        (is_bltu && ex_mem_alu_ltu) ||      // Take if less than (unsigned)
+                        (is_bgeu && !ex_mem_alu_ltu);       // Take if greater/equal (unsigned)
+
 reg [31:0] mem_wb_pcplus4;
 reg        mem_wb_isJAL;
 reg        mem_wb_isJALR;
@@ -315,21 +255,28 @@ assign mem_rstrb = ex_mem_mem_read;   // Read strobe for loads
   
 // Use instruction memory for fetches
 wire [31:0] instruction_from_mem = imem_rdata; // Get instruction from imem interface
-// Store data formatting (MEM stage)
-// assign mem_wdata[ 7: 0] = ex_mem_rs2_data[7:0];
-// assign mem_wdata[15: 8] = ex_mem_alu_result[0] ? ex_mem_rs2_data[7:0]  : ex_mem_rs2_data[15: 8]; // Use ex_mem_alu_result[0]
-// assign mem_wdata[23:16] = ex_mem_alu_result[1] ? ex_mem_rs2_data[7:0]  : ex_mem_rs2_data[23:16]; // Use ex_mem_alu_result[1]
-// assign mem_wdata[31:24] = ex_mem_alu_result[0] ? ex_mem_rs2_data[7:0]  :
-//                          ex_mem_alu_result[1] ? ex_mem_rs2_data[15:8] : ex_mem_rs2_data[31:24]; // Use ex_mem_alu_result[0/1]
-  assign mem_wdata = ex_mem_rs2_data;
-assign mem_wstrb = ex_mem_mem_write ? 4'b1111 : 4'b0000;
+wire [31:0] aligned_store_data;
+assign aligned_store_data = 
+    (ex_mem_funct3 == 3'b010) ? ex_mem_rs2_data :              // SW
+    (ex_mem_funct3 == 3'b001) ? {2{ex_mem_rs2_data[15:0]}} :   // SH
+    {4{ex_mem_rs2_data[7:0]}};       
+  assign mem_wdata = aligned_store_data;
+  // Store byte enables based on funct3 and address
+wire [3:0] store_byte_enables;
+assign store_byte_enables = 
+    (ex_mem_funct3 == 3'b010) ? 4'b1111 :                      // SW
+    (ex_mem_funct3 == 3'b001) ?                                // SH
+        (ex_mem_alu_result[1] ? 4'b1100 : 4'b0011) :
+    (ex_mem_funct3 == 3'b000) ?                                // SB
+        (ex_mem_alu_result[1] ? 
+            (ex_mem_alu_result[0] ? 4'b1000 : 4'b0100) :
+            (ex_mem_alu_result[0] ? 4'b0010 : 4'b0001)
+        ) :
+    4'b0000;
+assign mem_wstrb = ex_mem_mem_write ? store_byte_enables : 4'b0000;
+
 // Branch target calculation
  wire [31:0] branch_target_ex = pc_ex + id_ex_immediate;
-// Add STORE_wmask calculation in MEM stage
-//wire mem_byteAccess_mem     = (ex_mem_funct3[1:0] == 2'b00); // Already defined [cite: 193]
-//wire mem_halfwordAccess_mem = (ex_mem_funct3[1:0] == 2'b01); // Already defined [cite: 194]
-// wire [3:0] STORE_wmask_mem = mem_byteAccess_mem ? (ex_mem_alu_result[1] ? (ex_mem_alu_result[0] ? 4'b1000 : 4'b0100) : (ex_mem_alu_result[0] ? 4'b0010 : 4'b0001)) :
-//                             mem_halfwordAccess_mem ? (ex_mem_alu_result[1] ? 4'b1100 : 4'b0011) : 4'b1111;
 
 // Update mem_wstrb assignment
 //assign mem_wstrb = ex_mem_mem_write ? STORE_wmask_mem : 4'b0; // Use EX/MEM control signal
@@ -351,13 +298,14 @@ assign mem_wstrb = ex_mem_mem_write ? 4'b1111 : 4'b0000;
       .alu_in2(forwarded_alu_in2),      // Connect ALU input 2 (from Mux using ID/EX reg outputs)
       .ALUOp(id_ex_alu_op),       // Connect ALU control signal (from ID/EX reg output)
       .alu_out(alu_result),       // Output wire for ALU result (EX stage)
-      .zero_flag(zero_flag)       // Output wire for zero flag (EX stage)
+      .zero_flag(zero_flag),      // Output wire for zero flag (EX stage)
+        .alu_lt(alu_lt),               
+        .alu_ltu(alu_ltu)              
   );
 
   initial begin
       cycle = 0; // Initialize cycle counter
   end
-  // Placeholder logic for next PC selection
   assign next_pc = 
   (ex_mem_isJALR) ? (ex_mem_alu_result & 32'hFFFFFFFE) : // JALR target (mask LSB)
                  (take_branch_condition) ? ex_mem_branch_target :      // Taken Branch target
@@ -389,7 +337,8 @@ assign mem_wstrb = ex_mem_mem_write ? 4'b1111 : 4'b0000;
           id_ex_reg_write   <= 1'b0;
           id_ex_mem_to_reg  <= 1'b0;
           id_ex_funct3      <= 3'b0;
-
+        ex_mem_alu_lt     <= 1'b0;          // ← ADD THIS LINE
+        ex_mem_alu_ltu    <= 1'b0;          // ← ADD THIS LINE
           ex_mem_alu_result <= 32'b0;
           ex_mem_rs2_data <= 32'b0;
           ex_mem_rd_addr <= 32'b0;
@@ -448,15 +397,17 @@ assign mem_wstrb = ex_mem_mem_write ? 4'b1111 : 4'b0000;
           ex_mem_rd_addr <= id_ex_rd_addr;
           ex_mem_zero_flag  <= zero_flag;
           // Pass control signals through
+          ex_mem_alu_lt     <= alu_lt;            
+ex_mem_alu_ltu    <= alu_ltu;           
           ex_mem_mem_read   <= id_ex_mem_read;
           ex_mem_mem_write  <= id_ex_mem_write;
           ex_mem_reg_write  <= id_ex_reg_write;
           ex_mem_mem_to_reg <= id_ex_mem_to_reg;
           ex_mem_funct3 <= id_ex_funct3;
           ex_mem_isBtype <= id_ex_isBtype_reg;
-          id_ex_isBtype_reg <= is_btype_id;
-          id_ex_isJAL   <= is_jal_id;
-          id_ex_isJALR  <= is_jalr_id;
+          id_ex_isBtype_reg <= is_branch_ctrl;
+          id_ex_isJAL   <= is_jal_ctrl;
+          id_ex_isJALR  <= is_jalr_ctrl;
           ex_mem_isJALR <= id_ex_isJALR;
           ex_mem_isJAL <= id_ex_isJAL;
           ex_mem_branch_target <= branch_target_ex;

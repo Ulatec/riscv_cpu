@@ -3,6 +3,8 @@ module alu(
     input [31:0] alu_in2,
     input [3:0] ALUOp,
     output reg [31:0] alu_out,
+    output alu_lt,      // Signed less than flag for BLT/BGE
+    output alu_ltu,      // Unsigned less than flag for BLTU/BGEU
     output zero_flag
 );
 parameter ALU_ADD  = 4'b0000;
@@ -15,7 +17,10 @@ parameter ALU_SRL  = 4'b0110;
 parameter ALU_SRA  = 4'b0111;
 parameter ALU_SLT  = 4'b1000;
 parameter ALU_SLTU = 4'b1001;
+// Comparison flags for branch instructions
 assign zero_flag = (alu_out == 32'b0);
+assign alu_lt = $signed(alu_in1) < $signed(alu_in2);    // Signed comparison
+assign alu_ltu = alu_in1 < alu_in2;                     // Unsigned comparison
 always @(*) begin
     case (ALUOp)
         ALU_ADD:  alu_out = alu_in1 + alu_in2;
