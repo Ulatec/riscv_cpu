@@ -49,7 +49,6 @@ initial begin
   // Control Signals (Generated in ID, used in EX/MEM/WB)
   reg [3:0]  id_ex_alu_op;      // ALU operation code
   reg [1:0] id_ex_alu_in1_src;
-  reg [1:0] ctrl_alu_in1_src;
   reg        id_ex_alusrc;      // Mux select for ALU input 2 (0=rs2_data, 1=immediate)
   reg        id_ex_mem_read;    // Enable memory read in MEM stage
   reg        id_ex_mem_write;   // Enable memory write in MEM stage
@@ -123,7 +122,7 @@ wire alusrc_ctrl, mem_read_ctrl, mem_write_ctrl;
 wire reg_write_ctrl, mem_to_reg_ctrl;
 wire is_branch_ctrl, is_jal_ctrl, is_jalr_ctrl;
 wire is_csr_ctrl, is_ecall_ctrl, is_ebreak_ctrl;  
-
+wire retire_inst;
 control_unit control_inst(
     .opcode(opcode_id),
     .funct3(funct3_id),
@@ -139,10 +138,21 @@ control_unit control_inst(
     .mem_to_reg(mem_to_reg_ctrl),
     .is_branch(is_branch_ctrl),
     .is_jal(is_jal_ctrl),
-    .is_jalr(is_jalr_ctrl)
-    .is_csr(is_csr_ctrl),        // ← ADD
-    .is_ecall(is_ecall_ctrl),    // ← ADD
-    .is_ebreak(is_ebreak_ctrl)   // ← ADD
+    .is_jalr(is_jalr_ctrl),
+    .is_csr(is_csr_ctrl),    
+    .is_ecall(is_ecall_ctrl),    
+    .is_ebreak(is_ebreak_ctrl)   
+);
+csr_file csr_file_inst(
+    .clk(clk),
+    .rst(rst),
+    .csr_addr(mem_wb_csr_addr),
+    .csr_rdata(mem_wb_csr_rdata),
+    .csr_write(mem_wb_csr_write),
+    .csr_waddr(csr_addr),
+    .csr_wdata(mem_wb_csr_wdata),
+    .cycle_count(cycle),
+    .retire_inst(retire_inst)
 );
 
 wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM stage
@@ -179,7 +189,7 @@ assign store_rs2_forwarded =
     (ForwardStore == 2'b10) ? forward_data_mem :
                           id_ex_rs2_data;
 
-wire [31:0] csr_rdata_ex;
+wire [31:0] csr_rdata_ex = csr_rdata;
 wire [31:0] csr_operand = id_ex_is_csr_imm ? 
                           {27'b0, id_ex_rs1_addr} : 
                           forwarded_alu_in1;
@@ -211,6 +221,11 @@ reg ex_mem_alu_ltu;
     reg ex_mem_isJALR;
     reg [31:0] ex_mem_branch_target;
     reg ex_mem_isBtype;
+    reg [31:0] ex_mem_csr_wdata;     // Computed CSR write data
+reg [11:0] ex_mem_csr_addr;      // CSR address
+reg        ex_mem_is_csr;        // Is this a CSR instruction?
+reg        ex_mem_csr_write;     // Should CSR be written?
+reg [31:0] ex_mem_csr_rdata;     // CSR read data (for writeback)
 
     wire is_beq  = (ex_mem_funct3 == 3'b000);  // Branch if equal
     wire is_bne  = (ex_mem_funct3 == 3'b001);  // Branch if not equal
@@ -225,7 +240,11 @@ wire branch_taken = (is_beq  && ex_mem_zero_flag) ||   // Take if equal (zero)
                         (is_bge  && !ex_mem_alu_lt) ||      // Take if greater/equal (signed)
                         (is_bltu && ex_mem_alu_ltu) ||      // Take if less than (unsigned)
                         (is_bgeu && !ex_mem_alu_ltu);       // Take if greater/equal (unsigned)
-
+reg [31:0] mem_wb_csr_rdata;     // CSR read data
+reg [11:0] mem_wb_csr_addr;      // CSR address
+reg        mem_wb_is_csr;        // Is this a CSR instruction?
+reg [31:0] mem_wb_csr_wdata;     // CSR write data
+reg        mem_wb_csr_write;     // CSR write enable
 reg [31:0] mem_wb_pcplus4;
 reg        mem_wb_isJAL;
 reg        mem_wb_isJALR;
@@ -296,7 +315,10 @@ assign store_byte_enables =
         ) :
     4'b0000;
 assign mem_wstrb = ex_mem_mem_write ? store_byte_enables : 4'b0000;
-
+// CSR write signals (from WB stage)
+assign csr_write_wb = mem_wb_csr_write;
+assign csr_waddr_wb = mem_wb_csr_addr;
+assign csr_wdata_wb = mem_wb_csr_wdata;
 // Branch target calculation
  wire [31:0] branch_target_ex = pc_ex + id_ex_immediate;
 
@@ -359,6 +381,11 @@ assign mem_wstrb = ex_mem_mem_write ? store_byte_enables : 4'b0000;
           id_ex_reg_write   <= 1'b0;
           id_ex_mem_to_reg  <= 1'b0;
           id_ex_funct3      <= 3'b0;
+          ex_mem_csr_wdata  <= 32'b0;
+ex_mem_csr_addr   <= 12'b0;
+ex_mem_is_csr     <= 1'b0;
+ex_mem_csr_write  <= 1'b0;
+ex_mem_csr_rdata  <= 32'b0;
         ex_mem_alu_lt     <= 1'b0;          
         ex_mem_alu_ltu    <= 1'b0;          
           ex_mem_alu_result <= 32'b0;
@@ -388,6 +415,11 @@ assign mem_wstrb = ex_mem_mem_write ? store_byte_enables : 4'b0000;
           debug_ex_instruction  <= 32'h00000013;
           debug_mem_instruction <= 32'h00000013;
           debug_wb_instruction  <= 32'h00000013;
+          id_ex_csr_addr    <= 12'b0;
+id_ex_is_csr      <= 1'b0;
+id_ex_is_csr_imm  <= 1'b0;
+id_ex_is_ecall    <= 1'b0;
+id_ex_is_ebreak   <= 1'b0;
       end else begin
           // --- Clock PC ---
           pc_reg            <= next_pc;
@@ -417,6 +449,16 @@ assign mem_wstrb = ex_mem_mem_write ? store_byte_enables : 4'b0000;
           ex_mem_rs2_data <= store_rs2_forwarded;
           ex_mem_rd_addr <= id_ex_rd_addr;
           ex_mem_zero_flag  <= zero_flag;
+          ex_mem_csr_wdata  <= csr_wdata_computed;
+          id_ex_csr_addr    <= csr_addr;           // Latch CSR address
+id_ex_is_csr      <= is_csr_ctrl;        // Latch CSR flag
+id_ex_is_csr_imm  <= funct3_id[2];       // Immediate variant flag
+id_ex_is_ecall    <= is_ecall_ctrl;      // Latch ECALL flag
+id_ex_is_ebreak   <= is_ebreak_ctrl;     // Latch EBREAK flag
+ex_mem_csr_addr   <= id_ex_csr_addr;
+ex_mem_is_csr     <= id_ex_is_csr;
+ex_mem_csr_write  <= csr_should_write_ex;
+ex_mem_csr_rdata  <= csr_rdata_ex;
           // Pass control signals through
           ex_mem_alu_lt     <= alu_lt;            
 ex_mem_alu_ltu    <= alu_ltu;           
@@ -535,8 +577,8 @@ ex_mem_alu_ltu    <= alu_ltu;
     wire        mem_to_reg_wb = mem_wb_mem_to_reg; // MemToReg signal from MEM/WB reg
 
     // Register file write back data mux (Combinational - WB stage)
-    assign write_data_to_reg = mem_wb_mem_to_reg ? mem_wb_mem_data : wb_data;
-
+assign write_data_to_reg = mem_wb_is_csr ? mem_wb_csr_rdata :
+                          (mem_wb_mem_to_reg ? mem_wb_mem_data : wb_data);
 // Extended debug monitoring
 always @(posedge clk) begin
   if (!rst && cycle >= 1 && cycle <= 9) begin
