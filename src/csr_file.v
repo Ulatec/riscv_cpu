@@ -1,4 +1,4 @@
-`include "definitions.v"
+`include "../src/definitions.v"
 
 module csr_file(
     input clk,
@@ -10,9 +10,14 @@ module csr_file(
     input csr_write,
     input [11:0] csr_waddr,
     input [31:0] csr_wdata, 
+    // Trap handling
+    input trap_taken,
+    input [31:0] trap_cause,
+    input [31:0] trap_pc,
     //counters from CPU
     input [31:0] cycle_count,
-    input retire_inst
+    input retire_inst,
+    input mret_taken
 );
 
 //Hardware Info Registers
@@ -61,21 +66,73 @@ initial begin
    instr_ret_counter = 64'h0;
 end
 
-//Counter update and reset
+// ========== UNIFIED CSR UPDATE BLOCK ==========
+// Handles counters, trap handling, and CSR writes in priority order
 always @(posedge clk or posedge rst) begin
-if (rst) begin
+    if (rst) begin
+        // Reset counters
         cycle_counter <= 64'h0;
         instr_ret_counter <= 64'h0;
+        
+        // Reset all writable CSRs
+        mstatus <= 32'h0;
+        mie <= 32'h0;
+        mtvec <= 32'h0;
+        mscratch <= 32'h0;
+        mepc <= 32'h0;
+        mcause <= 32'h0;
+        mtval <= 32'h0;
+        mip <= 32'h0;
     end else begin
-        // Increment cycle counter every clock
+        // Increment cycle counter every clock (always happens)
         cycle_counter <= cycle_counter + 1;
         
-        // Increment instruction counter when instruction retires
+        // Increment instruction counter when instruction retires (always happens when retire_inst)
         if (retire_inst) begin
             instr_ret_counter <= instr_ret_counter + 1;
         end
+        
+        // ===== TRAP HANDLING HAS PRIORITY OVER CSR WRITES =====
+        if (trap_taken) begin
+            mepc    <= trap_pc;      // Save PC of trapping instruction
+            mcause  <= trap_cause;   // Save trap cause
+            mstatus[7] <= mstatus[3];  // MPIE <= MIE
+            mstatus[3] <= 1'b0;        // MIE <= 0
+            mstatus[12:11] <= 2'b11;   // MPP <= M-mode (3)
+            // Note: Other CSRs (mtvec, etc.) are NOT modified by trap
+        end
+        else if (mret_taken) begin
+            // Restore MIE from MPIE
+            mstatus[3] <= mstatus[7];  // MIE <= MPIE
+            mstatus[7] <= 1'b1;        // MPIE <= 1
+            mstatus[12:11] <= 2'b00;   // MPP <= U-mode (or lowest)
+        end
+        // ===== NORMAL CSR WRITES (only if no trap this cycle) =====
+        else if (csr_write) begin
+            case (csr_waddr)
+                // Machine Trap Setup
+                12'h300: mstatus <= csr_wdata & 32'h00001888;  // Only MIE, MPIE, MPP bits writable
+                12'h304: mie <= csr_wdata & 32'h00000888;      // Only MEIE, MTIE, MSIE writable
+                12'h305: mtvec <= csr_wdata;                   // Full 32-bit writable
+                
+                // Machine Trap Handling
+                12'h340: mscratch <= csr_wdata;  // Scratch register
+                12'h341: mepc <= csr_wdata;      // Exception PC
+                12'h342: mcause <= csr_wdata;    // Trap cause
+                12'h343: mtval <= csr_wdata;     // Trap value
+                12'h344: mip <= csr_wdata & 32'h00000888;  // Only MEIP, MTIP, MSIP writable
+                
+                // Note: Counters are read-only from software perspective
+                // Machine info registers are read-only
+                // misa is read-only
+                
+                default: ; // Ignore writes to read-only or unimplemented CSRs
+            endcase
+        end
     end
 end
+
+// ========== CSR READ LOGIC (Combinational) ==========
 always @(*) begin
     case (csr_addr)
         // Machine Information Registers
@@ -111,38 +168,4 @@ always @(*) begin
     endcase
 end
 
-// ========== CSR Write Logic ==========
-always @(posedge clk or posedge rst) begin
-    if (rst) begin
-        // Reset all writable CSRs
-        mstatus <= 32'h0;
-        mie <= 32'h0;
-        mtvec <= 32'h0;
-        mscratch <= 32'h0;
-        mepc <= 32'h0;
-        mcause <= 32'h0;
-        mtval <= 32'h0;
-        mip <= 32'h0;
-    end else if (csr_write) begin
-        case (csr_waddr)
-            // Machine Trap Setup
-            12'h300: mstatus <= csr_wdata & 32'h00001888;  // Only MIE, MPIE, MPP bits writable
-            12'h304: mie <= csr_wdata & 32'h00000888;      // Only MEIE, MTIE, MSIE writable
-            12'h305: mtvec <= csr_wdata;                   // Full 32-bit writable
-            
-            // Machine Trap Handling
-            12'h340: mscratch <= csr_wdata;  // Scratch register
-            12'h341: mepc <= csr_wdata;      // Exception PC
-            12'h342: mcause <= csr_wdata;    // Trap cause
-            12'h343: mtval <= csr_wdata;     // Trap value
-            12'h344: mip <= csr_wdata & 32'h00000888;  // Only MEIP, MTIP, MSIP writable
-            
-            // Note: Counters are read-only from software perspective
-            // Machine info registers are read-only
-            // misa is read-only
-            
-            default: ; // Ignore writes to read-only or unimplemented CSRs
-        endcase
-    end
-end
 endmodule

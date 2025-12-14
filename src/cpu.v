@@ -1,8 +1,8 @@
-`include "reg_file.v" // Include the register file module
- `include "ALU.v"      // Include the ALU module
- `include "csr_file.v"
-`include "definitions.v" 
-`include "control_unit.v"
+`include "../src/reg_file.v" // Include the register file module
+ `include "../src/ALU.v"      // Include the ALU module
+ `include "../src/csr_file.v"
+`include "../src/definitions.v" 
+`include "../src/control_unit.v"
 module cpu(
     input rst, clk,
       // Instruction memory (read-only)
@@ -65,11 +65,13 @@ reg        id_ex_is_ebreak;  // Is this EBREAK?
 reg        id_ex_is_csr_imm; // 
   // Store instruction type information if needed later (optional but helpful)
   reg [2:0]  id_ex_funct3;      // Pass funct3 for Load/Store byte/halfword handling
-
+reg id_ex_is_mret;
 
   //********* Wires for interfacing with Reg File and ALU *******//
   wire [31:0] rs1_data;      // Output from Reg File (ID stage)
   wire [31:0] rs2_data;      // Output from Reg File (ID stage)
+    wire        alu_lt;  
+  wire        alu_ltu;    
   wire [31:0] alu_result;    // Output from ALU (EX stage)
   wire        zero_flag;     // Output from ALU (EX stage)
   wire [31:0] write_data_to_reg; // Data input to Reg File write port (WB stage)
@@ -123,12 +125,14 @@ wire reg_write_ctrl, mem_to_reg_ctrl;
 wire is_branch_ctrl, is_jal_ctrl, is_jalr_ctrl;
 wire is_csr_ctrl, is_ecall_ctrl, is_ebreak_ctrl;  
 wire retire_inst;
+wire is_mret_ctrl;
 control_unit control_inst(
     .opcode(opcode_id),
     .funct3(funct3_id),
     .funct7(funct7_id),
     .rd(rd_id),
     .rs1(rs1_id),
+    .rs2(rs2_id),
     .alu_op(alu_op_ctrl),
     .alu_in1_src(ctrl_alu_in1_src),
     .alusrc(alusrc_ctrl),
@@ -141,18 +145,25 @@ control_unit control_inst(
     .is_jalr(is_jalr_ctrl),
     .is_csr(is_csr_ctrl),    
     .is_ecall(is_ecall_ctrl),    
-    .is_ebreak(is_ebreak_ctrl)   
+    .is_ebreak(is_ebreak_ctrl),
+    .is_mret(is_mret_ctrl)
 );
+wire [31:0] csr_rdata; 
 csr_file csr_file_inst(
     .clk(clk),
     .rst(rst),
-    .csr_addr(mem_wb_csr_addr),
-    .csr_rdata(mem_wb_csr_rdata),
+    .csr_addr(id_ex_csr_addr),
+    .csr_rdata(csr_rdata),
     .csr_write(mem_wb_csr_write),
-    .csr_waddr(csr_addr),
+    .csr_waddr(mem_wb_csr_addr),
     .csr_wdata(mem_wb_csr_wdata),
+        // Trap handling (MEM stage)
+    .trap_taken(trap_taken),
+    .trap_cause(trap_cause),
+    .trap_pc(trap_pc),
     .cycle_count(cycle),
-    .retire_inst(retire_inst)
+    .retire_inst(retire_inst),
+    .mret_taken(ex_mem_is_mret)
 );
 
 wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM stage
@@ -216,6 +227,7 @@ reg ex_mem_alu_ltu;
     reg ex_mem_mem_write;
     reg ex_mem_reg_write;
     reg ex_mem_mem_to_reg;
+    reg ex_mem_is_mret;
     reg [31:0] ex_mem_pcplus4;
     reg ex_mem_isJAL;
     reg ex_mem_isJALR;
@@ -226,7 +238,8 @@ reg [11:0] ex_mem_csr_addr;      // CSR address
 reg        ex_mem_is_csr;        // Is this a CSR instruction?
 reg        ex_mem_csr_write;     // Should CSR be written?
 reg [31:0] ex_mem_csr_rdata;     // CSR read data (for writeback)
-
+reg        ex_mem_is_ecall;   
+reg        ex_mem_is_ebreak;   
     wire is_beq  = (ex_mem_funct3 == 3'b000);  // Branch if equal
     wire is_bne  = (ex_mem_funct3 == 3'b001);  // Branch if not equal
     wire is_blt  = (ex_mem_funct3 == 3'b100);  // Branch if less than (signed)
@@ -257,6 +270,13 @@ reg        mem_wb_isJALR;
 
   // Branching Logic (will use ALU result/flags in EX/MEM stage)
 assign take_branch_condition = ex_mem_isBtype && branch_taken;
+wire trap_taken = ex_mem_is_ecall || ex_mem_is_ebreak;
+// Trap cause codes (defined in RISC-V spec)
+wire [31:0] trap_cause = ex_mem_is_ebreak ? 32'd3 :   // Breakpoint
+                         ex_mem_is_ecall  ? 32'd11 :  // Environment call from M-mode
+                         32'd0;
+wire [31:0] trap_pc = ex_mem_pcplus4 - 4;  // Reconstruct PC of trapping instruction
+
   reg [31:0] branch_addr;
   // PC Calculation Logic for branches/jumps (Part of EX stage)
   wire [31:0] jalr_target_calc = alu_result;
@@ -350,7 +370,13 @@ assign csr_wdata_wb = mem_wb_csr_wdata;
   initial begin
       cycle = 0; // Initialize cycle counter
   end
+  wire [31:0] mtvec_value;
+  wire [31:0] mepc_value;
+  assign mtvec_value = csr_file_inst.mtvec;  // Direct access to CSR
+  assign mepc_value = csr_file_inst.mepc;
   assign next_pc = 
+  (trap_taken) ? mtvec_value :  
+  (ex_mem_is_mret)  ? mepc_value :     // MRET returns to mepc
   (ex_mem_isJALR) ? (ex_mem_alu_result & 32'hFFFFFFFE) : // JALR target (mask LSB)
                  (take_branch_condition) ? ex_mem_branch_target :      // Taken Branch target
                  (ex_mem_isJAL) ? ex_mem_branch_target :          // JAL target
@@ -401,11 +427,17 @@ ex_mem_csr_rdata  <= 32'b0;
           ex_mem_mem_read <= 1'b0;
           ex_mem_mem_write <= 1'b0;
           ex_mem_reg_write <= 1'b0;
+          ex_mem_is_mret <= 1'b0;
         mem_wb_alu_result <= 32'b0;
         mem_wb_rd_addr    <= 5'b0;
         mem_wb_reg_write  <= 1'b0;
         mem_wb_mem_to_reg <= 1'b0;
         mem_wb_pcplus4   <= 32'b0;
+        mem_wb_csr_rdata <= 32'b0;
+        mem_wb_csr_wdata <= 32'b0;
+mem_wb_csr_addr  <= 12'b0;
+mem_wb_csr_write <= 1'b0;
+mem_wb_is_csr    <= 1'b0;
         id_ex_isJAL <= 1'b0;
         id_ex_isJALR <= 1'b0;
         ex_mem_isBtype <= 1'b0;
@@ -416,10 +448,13 @@ ex_mem_csr_rdata  <= 32'b0;
           debug_mem_instruction <= 32'h00000013;
           debug_wb_instruction  <= 32'h00000013;
           id_ex_csr_addr    <= 12'b0;
-id_ex_is_csr      <= 1'b0;
-id_ex_is_csr_imm  <= 1'b0;
-id_ex_is_ecall    <= 1'b0;
-id_ex_is_ebreak   <= 1'b0;
+          ex_mem_is_ecall   <= 1'b0;              
+      ex_mem_is_ebreak  <= 1'b0;   
+      id_ex_is_csr      <= 1'b0;
+      id_ex_is_csr_imm  <= 1'b0;
+      id_ex_is_ecall    <= 1'b0;
+      id_ex_is_ebreak   <= 1'b0;
+      id_ex_is_mret  <= 1'b0;
       end else begin
           // --- Clock PC ---
           pc_reg            <= next_pc;
@@ -458,7 +493,9 @@ id_ex_is_ebreak   <= is_ebreak_ctrl;     // Latch EBREAK flag
 ex_mem_csr_addr   <= id_ex_csr_addr;
 ex_mem_is_csr     <= id_ex_is_csr;
 ex_mem_csr_write  <= csr_should_write_ex;
-ex_mem_csr_rdata  <= csr_rdata_ex;
+ex_mem_csr_rdata  <= csr_rdata;
+ex_mem_is_ecall   <= id_ex_is_ecall;    
+ex_mem_is_ebreak  <= id_ex_is_ebreak;   
           // Pass control signals through
           ex_mem_alu_lt     <= alu_lt;            
 ex_mem_alu_ltu    <= alu_ltu;           
@@ -475,13 +512,18 @@ ex_mem_alu_ltu    <= alu_ltu;
           ex_mem_isJAL <= id_ex_isJAL;
           ex_mem_branch_target <= branch_target_ex;
           mem_wb_mem_data   <= mem_rdata;
-
+id_ex_is_mret <= is_mret_ctrl;
+ex_mem_is_mret <= id_ex_is_mret;
         // Pass through values from previous stage (EX/MEM)
         mem_wb_alu_result <= ex_mem_alu_result;
         mem_wb_rd_addr    <= ex_mem_rd_addr;
         mem_wb_reg_write  <= ex_mem_reg_write;
         mem_wb_mem_to_reg <= ex_mem_mem_to_reg;
-
+mem_wb_csr_rdata  <= ex_mem_csr_rdata;
+mem_wb_csr_wdata  <= ex_mem_csr_wdata;
+mem_wb_csr_addr   <= ex_mem_csr_addr;
+mem_wb_csr_write  <= ex_mem_csr_write;
+mem_wb_is_csr     <= ex_mem_is_csr;
           // MEM/WB latches
           ex_mem_pcplus4 <= id_ex_pcplus4;
             mem_wb_pcplus4 <= ex_mem_pcplus4;

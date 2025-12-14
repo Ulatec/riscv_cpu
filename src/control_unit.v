@@ -1,4 +1,4 @@
-`include "definitions.v"
+`include "../src/definitions.v"
 module control_unit(
     // Inputs - Instruction fields
     input [4:0]  opcode,      // instruction[6:2]
@@ -6,7 +6,7 @@ module control_unit(
     input [6:0]  funct7,      // instruction[31:25]
     input [4:0]  rd,          // instruction[11:7] (for CSR, checking x0)
     input [4:0]  rs1,         // instruction[19:15] (for CSR immediate)
-    
+    input [4:0]  rs2,
     // Outputs - Control signals
     output reg [3:0]  alu_op,
     output reg [1:0]  alu_in1_src,
@@ -22,7 +22,8 @@ module control_unit(
     output reg        is_jalr,
     output reg        is_csr,
     output reg        is_ecall,
-    output reg        is_ebreak
+    output reg        is_ebreak,
+    output reg        is_mret
 );
 
 // Control Unit Logic (Combinational)
@@ -41,7 +42,7 @@ module control_unit(
         is_csr = 1'b0;
         is_ecall = 1'b0;
         is_ebreak = 1'b0;
-        
+        is_mret = 1'b0;
         case (opcode)
             5'b01100: begin // R-type
                 reg_write = 1'b1;
@@ -105,12 +106,19 @@ module control_unit(
             
             5'b11100: begin // System
                 if (funct3 == 3'b000) begin
-                    if (funct7[0]) is_ebreak = 1'b1;
-                    else is_ecall = 1'b1;
+                    if (funct7 == 7'b0011000 && rs2 == 5'b00010) begin
+                        is_mret = 1'b1;           // MRET: funct7=0x18, rs2=2
+                    end
+                    else if (rs2[0]) begin
+                        is_ebreak = 1'b1;         // EBREAK: rs2=1
+                    end
+                    else begin
+                        is_ecall = 1'b1;          // ECALL: rs2=0
+                    end
                 end else begin
                     is_csr = 1'b1;
                     reg_write = 1'b1;
-                    alusrc = (funct3[2]); // Immediate variants
+                    alusrc = (funct3[2]);
                 end
             end
             5'b00100: begin // I-type arithmetic (ADDI, XORI, SLLI, etc.)
