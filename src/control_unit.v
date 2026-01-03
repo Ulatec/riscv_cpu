@@ -25,7 +25,7 @@ module control_unit(
     output reg        is_ebreak,
     output reg        is_mret
 );
-
+wire is_mext = (funct7 == 7'b0000001);
 // Control Unit Logic (Combinational)
     always @(*) begin
         // Default values
@@ -44,18 +44,34 @@ module control_unit(
         is_ebreak = 1'b0;
         is_mret = 1'b0;
         case (opcode)
-            5'b01100: begin // R-type
+            5'b01100: begin // R-type (Base + M extension)
                 reg_write = 1'b1;
-                case (funct3)
-                    3'b000: alu_op = funct7[5] ? `ALU_SUB : `ALU_ADD;
-                    3'b001: alu_op = `ALU_SLL;
-                    3'b010: alu_op = `ALU_SLT;
-                    3'b011: alu_op = `ALU_SLTU;
-                    3'b100: alu_op = `ALU_XOR;
-                    3'b101: alu_op = funct7[5] ? `ALU_SRA : `ALU_SRL;
-                    3'b110: alu_op = `ALU_OR;
-                    3'b111: alu_op = `ALU_AND;
-                endcase
+                
+                if (is_mext) begin
+                    // M-extension: funct3 directly maps to operation
+                    case (funct3)
+                        3'b000: alu_op = `ALU_MUL;
+                        3'b001: alu_op = `ALU_MULH;
+                        3'b010: alu_op = `ALU_MULHSU;
+                        3'b011: alu_op = `ALU_MULHU;
+                        3'b100: alu_op = `ALU_DIV;
+                        3'b101: alu_op = `ALU_DIVU;
+                        3'b110: alu_op = `ALU_REM;
+                        3'b111: alu_op = `ALU_REMU;
+                    endcase
+                end else begin
+                    // Base R-type instructions
+                    case (funct3)
+                        3'b000: alu_op = funct7[5] ? `ALU_SUB : `ALU_ADD;
+                        3'b001: alu_op = `ALU_SLL;
+                        3'b010: alu_op = `ALU_SLT;
+                        3'b011: alu_op = `ALU_SLTU;
+                        3'b100: alu_op = `ALU_XOR;
+                        3'b101: alu_op = funct7[5] ? `ALU_SRA : `ALU_SRL;
+                        3'b110: alu_op = `ALU_OR;
+                        3'b111: alu_op = `ALU_AND;
+                    endcase
+                end
             end
             
             5'b00000: begin // Load

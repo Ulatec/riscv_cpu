@@ -1,7 +1,7 @@
-# RISC-V RV32I CPU Implementation
-## 5-Stage Pipelined Processor with CSR Support
+# RISC-V RV32IM CPU Implementation
+## 5-Stage Pipelined Processor with Trap Handling and CSR Support
 
-A hardware implementation of a RISC-V RV32I processor in Verilog, featuring a classic 5-stage pipeline, data forwarding, and Control and Status Register (CSR) support.
+A hardware implementation of a RISC-V RV32IM processor in Verilog, featuring a classic 5-stage pipeline, data forwarding, multiply/divide operations, full CSR support, and trap handling.
 
 ---
 
@@ -23,16 +23,18 @@ A hardware implementation of a RISC-V RV32I processor in Verilog, featuring a cl
 
 ## 🎯 Overview
 
-This project implements a RISC-V RV32I (32-bit integer base instruction set) processor with a 5-stage pipeline architecture. The design emphasizes clarity and educational value while maintaining functional correctness. It's designed as a learning project to deeply understand CPU architecture, pipelining, and the RISC-V ISA.
+This project implements a RISC-V RV32IM (32-bit integer base instruction set with multiply/divide extension) processor with a 5-stage pipeline architecture. The design emphasizes clarity and educational value while maintaining functional correctness. It's designed as a learning project to deeply understand CPU architecture, pipelining, and the RISC-V ISA.
 
 ### Key Highlights
 
-- **Complete RV32I Base ISA**: All 40 base integer instructions fully functional
+- **Complete RV32IM ISA**: All 40 base integer instructions + 8 M-extension instructions
 - **5-Stage Pipeline**: IF, ID, EX, MEM, WB stages with proper hazard handling
-- **Data Forwarding**: Eliminates most data hazards
-- **CSR Infrastructure**: Foundation laid for Control and Status Registers (integration in progress)
-- **Modular Design**: Separate control unit for maintainability
-- **Well-Documented**: Extensive comments and documentation
+- **Data Forwarding**: EX-to-EX and MEM-to-EX forwarding eliminates most data hazards
+- **M-Extension**: Full multiply/divide support with RISC-V spec-compliant edge cases
+- **Complete CSR Support**: All 6 CSR instructions fully functional with atomic read-modify-write
+- **Trap Handling**: ECALL, EBREAK, and MRET with proper mstatus management
+- **Performance Counters**: 64-bit cycle and instruction-retired counters
+- **Modular Design**: Separate control unit and CSR file for maintainability
 
 ---
 
@@ -40,7 +42,7 @@ This project implements a RISC-V RV32I (32-bit integer base instruction set) pro
 
 ### Instruction Support
 
-#### ✅ Fully Implemented
+#### ✅ Fully Implemented - RV32I Base (40 instructions)
 - **R-Type**: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
 - **I-Type Arithmetic**: ADDI, ANDI, ORI, XORI, SLLI, SRLI, SRAI, SLTI, SLTIU
 - **Load Instructions**: LW, LH, LB, LHU, LBU
@@ -49,46 +51,98 @@ This project implements a RISC-V RV32I (32-bit integer base instruction set) pro
 - **Jump Instructions**: JAL, JALR
 - **Upper Immediate**: LUI, AUIPC
 
-#### 🚧 Partially Implemented
-- **CSR Instructions**: CSRRW, CSRRS, CSRRC, CSRRWI, CSRRSI, CSRRCI (decoded, integration in progress)
-- **System Instructions**: ECALL, EBREAK (decoded, not fully functional)
+#### ✅ Fully Implemented - RV32M Extension (8 instructions)
+- **Multiply**: MUL, MULH, MULHSU, MULHU
+- **Divide**: DIV, DIVU
+- **Remainder**: REM, REMU
+
+#### ✅ Fully Implemented - CSR Instructions (6 instructions)
+- **Register-based**: CSRRW, CSRRS, CSRRC
+- **Immediate-based**: CSRRWI, CSRRSI, CSRRCI
+
+#### ✅ Fully Implemented - System Instructions
+- **ECALL**: Environment call (triggers trap with mcause=11)
+- **EBREAK**: Breakpoint (triggers trap with mcause=3)
+- **MRET**: Return from machine-mode trap handler
 
 ### Pipeline Features
 
 - **Data Forwarding**: EX-to-EX and MEM-to-EX forwarding paths
-- **Separate Store Forwarding**: Independent forwarding for store data
-- **Branch Handling**: Branch resolution in MEM stage
-- **Jump Support**: JAL and JALR with proper PC calculation
+- **Separate Store Forwarding**: Independent forwarding for store data (rs2)
+- **Branch Resolution**: All 6 branch conditions evaluated in MEM stage
+- **Jump Support**: JAL and JALR with proper PC+4 link and target calculation
+- **Pipeline Flushing**: Automatic flush on control flow changes (branches, jumps, traps)
 
-### CSR Support (In Progress)
+### M-Extension Features
 
-The infrastructure for CSR support is in place but not yet fully functional:
+The M-extension provides hardware multiply and divide operations:
 
-- **CSR File Module**: Created with register storage
-- **Control Unit**: Decodes CSR instructions correctly
-- **Pipeline Registers**: Added for CSR data flow
-- **Still TODO**: Complete pipeline integration and testing
+- **64-bit Multiplication**: Full 64-bit product computed for MULH variants
+- **Signed/Unsigned Support**: Proper handling of signed × signed, unsigned × unsigned, and mixed operands
+- **Division Edge Cases**: RISC-V spec-compliant handling of:
+  - Division by zero: Returns defined values (-1 for DIV, 0xFFFFFFFF for DIVU)
+  - Signed overflow (MIN_INT ÷ -1): Returns MIN_INT for DIV, 0 for REM
+- **Single-Cycle Operation**: All M-extension operations complete in one cycle
 
-**Machine Mode CSRs** (defined but not operational):
-  - `mstatus` (0x300) - Machine status
-  - `mie` (0x304) - Interrupt enable
-  - `mtvec` (0x305) - Trap vector
-  - `mscratch` (0x340) - Scratch register
-  - `mepc` (0x341) - Exception PC
-  - `mcause` (0x342) - Trap cause
-  - `mtval` (0x343) - Trap value
-  - `mip` (0x344) - Interrupt pending
+### CSR Support
 
-**Performance Counters** (defined but not operational):
-  - `cycle` (0xC00) - Cycle counter
-  - `time` (0xC01) - Time counter (placeholder)
-  - `instret` (0xC02) - Instructions retired
+Full machine-mode CSR implementation:
+
+**Machine Information Registers** (read-only):
+| Address | Name | Description |
+|---------|------|-------------|
+| 0xF11 | mvendorid | Vendor ID (0 for non-commercial) |
+| 0xF12 | marchid | Architecture ID |
+| 0xF13 | mimpid | Implementation ID |
+| 0xF14 | mhartid | Hardware thread ID |
+
+**Machine Trap Setup**:
+| Address | Name | Description |
+|---------|------|-------------|
+| 0x300 | mstatus | Machine status (MIE, MPIE, MPP fields) |
+| 0x301 | misa | ISA and extensions (reports RV32I) |
+| 0x304 | mie | Machine interrupt enable |
+| 0x305 | mtvec | Trap vector base address |
+
+**Machine Trap Handling**:
+| Address | Name | Description |
+|---------|------|-------------|
+| 0x340 | mscratch | Scratch register for trap handlers |
+| 0x341 | mepc | Exception program counter |
+| 0x342 | mcause | Trap cause code |
+| 0x343 | mtval | Trap value (bad address/instruction) |
+| 0x344 | mip | Interrupt pending |
+
+**Performance Counters** (64-bit, read-only):
+| Address | Name | Description |
+|---------|------|-------------|
+| 0xC00 | cycle | Cycle counter (low 32 bits) |
+| 0xC80 | cycleh | Cycle counter (high 32 bits) |
+| 0xC02 | instret | Instructions retired (low 32 bits) |
+| 0xC82 | instreth | Instructions retired (high 32 bits) |
+
+### Trap Handling
+
+Complete trap mechanism with proper state management:
+
+- **Trap Entry** (on ECALL/EBREAK):
+  - Saves PC to `mepc`
+  - Saves cause code to `mcause`
+  - Saves MIE to MPIE, clears MIE (disables interrupts)
+  - Sets MPP to current privilege mode (M-mode)
+  - Jumps to `mtvec`
+
+- **Trap Return** (on MRET):
+  - Restores MIE from MPIE
+  - Sets MPIE to 1
+  - Returns to address in `mepc`
 
 ### Memory Interface
 
 - **Harvard Architecture**: Separate instruction and data memory interfaces
-- **Byte-Addressable**: Support for byte, halfword, and word accesses
-- **Byte Enables**: 4-bit write strobe for flexible store operations
+- **Byte-Addressable**: Full support for byte, halfword, and word accesses
+- **Byte Enables**: 4-bit write strobe with proper alignment for SB/SH/SW
+- **Aligned Store Data**: Data properly replicated for sub-word stores
 
 ---
 
@@ -104,7 +158,8 @@ The infrastructure for CSR support is in place but not yet fully functional:
      │              │              │              │              │
      │              │              │              │              │
    PC Reg      Register File     ALU          Data Mem      Reg Write
-                Control Unit                  CSR File
+               Control Unit   (incl. M-ext)   CSR File
+                                             Trap Logic
 ```
 
 ### Data Forwarding Paths
@@ -121,14 +176,48 @@ The infrastructure for CSR support is in place but not yet fully functional:
             Result        Result        Inputs
                 │             │
                 └─────────────┴───────▶ ALU Inputs
+                                       Store Data
+```
+
+### Trap Handling Flow
+
+```
+ECALL/EBREAK detected (MEM stage)
+         │
+         ▼
+┌─────────────────────────┐
+│  Save mepc ← trap_pc    │
+│  Save mcause ← cause    │
+│  mstatus.MPIE ← MIE     │
+│  mstatus.MIE ← 0        │
+│  mstatus.MPP ← M-mode   │
+└─────────────────────────┘
+         │
+         ▼
+    next_pc ← mtvec
+         │
+         ▼
+   [Trap Handler Code]
+         │
+         ▼
+       MRET
+         │
+         ▼
+┌─────────────────────────┐
+│  mstatus.MIE ← MPIE     │
+│  mstatus.MPIE ← 1       │
+└─────────────────────────┘
+         │
+         ▼
+    next_pc ← mepc
 ```
 
 ### Pipeline Registers
 
 - **IF/ID**: Instruction, PC+4
-- **ID/EX**: Control signals, register data, immediate, addresses
-- **EX/MEM**: ALU result, store data, control signals, branch info
-- **MEM/WB**: Memory data, ALU result, control signals
+- **ID/EX**: Control signals, register data, immediate, addresses, CSR address, trap flags
+- **EX/MEM**: ALU result, store data, control signals, branch info, CSR data, trap signals
+- **MEM/WB**: Memory data, ALU result, CSR read data, control signals
 
 ---
 
@@ -138,7 +227,7 @@ The infrastructure for CSR support is in place but not yet fully functional:
 
 | Type | Format | Examples |
 |------|--------|----------|
-| R-Type | `op rd, rs1, rs2` | ADD, SUB, AND, OR, XOR |
+| R-Type | `op rd, rs1, rs2` | ADD, SUB, MUL, DIV |
 | I-Type | `op rd, rs1, imm` | ADDI, LW, JALR |
 | S-Type | `op rs2, imm(rs1)` | SW, SH, SB |
 | B-Type | `op rs1, rs2, label` | BEQ, BNE, BLT |
@@ -154,12 +243,32 @@ SUB   rd, rs1, rs2    # rd = rs1 - rs2
 AND   rd, rs1, rs2    # rd = rs1 & rs2
 OR    rd, rs1, rs2    # rd = rs1 | rs2
 XOR   rd, rs1, rs2    # rd = rs1 ^ rs2
-SLL   rd, rs1, rs2    # rd = rs1 << rs2
-SRL   rd, rs1, rs2    # rd = rs1 >> rs2 (logical)
-SRA   rd, rs1, rs2    # rd = rs1 >> rs2 (arithmetic)
+SLL   rd, rs1, rs2    # rd = rs1 << rs2[4:0]
+SRL   rd, rs1, rs2    # rd = rs1 >> rs2[4:0] (logical)
+SRA   rd, rs1, rs2    # rd = rs1 >> rs2[4:0] (arithmetic)
 SLT   rd, rs1, rs2    # rd = (rs1 < rs2) ? 1 : 0 (signed)
 SLTU  rd, rs1, rs2    # rd = (rs1 < rs2) ? 1 : 0 (unsigned)
 ```
+
+#### M-Extension (Multiply/Divide)
+```assembly
+MUL    rd, rs1, rs2   # rd = (rs1 × rs2)[31:0]     (lower 32 bits)
+MULH   rd, rs1, rs2   # rd = (rs1 × rs2)[63:32]    (upper, signed × signed)
+MULHSU rd, rs1, rs2   # rd = (rs1 × rs2)[63:32]    (upper, signed × unsigned)
+MULHU  rd, rs1, rs2   # rd = (rs1 × rs2)[63:32]    (upper, unsigned × unsigned)
+DIV    rd, rs1, rs2   # rd = rs1 ÷ rs2             (signed)
+DIVU   rd, rs1, rs2   # rd = rs1 ÷ rs2             (unsigned)
+REM    rd, rs1, rs2   # rd = rs1 % rs2             (signed)
+REMU   rd, rs1, rs2   # rd = rs1 % rs2             (unsigned)
+```
+
+**M-Extension Edge Cases (RISC-V Specification):**
+| Operation | Division by Zero | Overflow (MIN_INT ÷ -1) |
+|-----------|-----------------|-------------------------|
+| DIV | -1 | MIN_INT |
+| DIVU | 2³²-1 | N/A |
+| REM | dividend | 0 |
+| REMU | dividend | N/A |
 
 #### I-Type Arithmetic
 ```assembly
@@ -186,23 +295,23 @@ LBU  rd, imm(rs1)     # rd = MEM[rs1 + imm] (byte, zero-extended)
 #### Store Instructions
 ```assembly
 SW   rs2, imm(rs1)    # MEM[rs1 + imm] = rs2 (word)
-SH   rs2, imm(rs1)    # MEM[rs1 + imm] = rs2 (halfword)
-SB   rs2, imm(rs1)    # MEM[rs1 + imm] = rs2 (byte)
+SH   rs2, imm(rs1)    # MEM[rs1 + imm] = rs2[15:0] (halfword)
+SB   rs2, imm(rs1)    # MEM[rs1 + imm] = rs2[7:0] (byte)
 ```
 
 #### Branch Instructions
 ```assembly
-BEQ   rs1, rs2, label # if (rs1 == rs2) PC = label
-BNE   rs1, rs2, label # if (rs1 != rs2) PC = label
-BLT   rs1, rs2, label # if (rs1 < rs2) PC = label (signed)
-BGE   rs1, rs2, label # if (rs1 >= rs2) PC = label (signed)
-BLTU  rs1, rs2, label # if (rs1 < rs2) PC = label (unsigned)
-BGEU  rs1, rs2, label # if (rs1 >= rs2) PC = label (unsigned)
+BEQ   rs1, rs2, label # if (rs1 == rs2) PC = PC + offset
+BNE   rs1, rs2, label # if (rs1 != rs2) PC = PC + offset
+BLT   rs1, rs2, label # if (rs1 < rs2) PC = PC + offset (signed)
+BGE   rs1, rs2, label # if (rs1 >= rs2) PC = PC + offset (signed)
+BLTU  rs1, rs2, label # if (rs1 < rs2) PC = PC + offset (unsigned)
+BGEU  rs1, rs2, label # if (rs1 >= rs2) PC = PC + offset (unsigned)
 ```
 
 #### Jump Instructions
 ```assembly
-JAL   rd, label       # rd = PC + 4; PC = PC + imm
+JAL   rd, label       # rd = PC + 4; PC = PC + offset
 JALR  rd, imm(rs1)    # rd = PC + 4; PC = (rs1 + imm) & ~1
 ```
 
@@ -215,11 +324,20 @@ AUIPC rd, imm         # rd = PC + (imm << 12)
 #### CSR Instructions
 ```assembly
 CSRRW  rd, csr, rs1   # rd = CSR; CSR = rs1
-CSRRS  rd, csr, rs1   # rd = CSR; CSR |= rs1
-CSRRC  rd, csr, rs1   # rd = CSR; CSR &= ~rs1
-CSRRWI rd, csr, imm   # rd = CSR; CSR = imm
-CSRRSI rd, csr, imm   # rd = CSR; CSR |= imm
-CSRRCI rd, csr, imm   # rd = CSR; CSR &= ~imm
+CSRRS  rd, csr, rs1   # rd = CSR; CSR = CSR | rs1
+CSRRC  rd, csr, rs1   # rd = CSR; CSR = CSR & ~rs1
+CSRRWI rd, csr, uimm  # rd = CSR; CSR = uimm
+CSRRSI rd, csr, uimm  # rd = CSR; CSR = CSR | uimm
+CSRRCI rd, csr, uimm  # rd = CSR; CSR = CSR & ~uimm
+```
+
+**Note**: When rs1=x0 for CSRRS/CSRRC (or uimm=0 for immediate variants), the CSR is not written (read-only operation).
+
+#### System Instructions
+```assembly
+ECALL                 # Environment call - trap to handler
+EBREAK                # Breakpoint - trap to handler
+MRET                  # Return from machine-mode trap
 ```
 
 ---
@@ -235,22 +353,25 @@ CSRRCI rd, csr, imm   # rd = CSR; CSR &= ~imm
 - Decode opcode, funct3, funct7, register addresses
 - Read from register file (rs1, rs2)
 - Generate control signals via control unit
+- Detect M-extension instructions via `funct7 == 7'b0000001`
+- Detect system instructions (ECALL, EBREAK, MRET)
 - Extract and sign-extend immediate values
 - Pass decoded information to ID/EX register
 
 ### 3. EX (Execute)
 - **Forwarding Logic**: Select forwarded values if needed
-- **ALU Operation**: Perform arithmetic/logic operation
-- **Branch Calculation**: Compute branch target and condition
+- **ALU Operation**: Perform arithmetic/logic/multiply/divide operation
+- **Branch Calculation**: Compute branch target address
 - **Address Calculation**: Calculate memory address for loads/stores
-- **CSR Operation**: Compute new CSR value
+- **CSR Operation**: Compute new CSR value (read-modify-write)
 - Pass results to EX/MEM register
 
 ### 4. MEM (Memory Access)
-- **Load**: Read data from memory
-- **Store**: Write data to memory (with byte enables)
-- **Branch Resolution**: Determine if branch is taken
-- **CSR Write**: Write to CSR file
+- **Load**: Read data from memory, format based on LB/LH/LW
+- **Store**: Write data to memory with proper byte enables
+- **Branch Resolution**: Evaluate condition and determine if taken
+- **Trap Detection**: Detect ECALL/EBREAK, save trap state
+- **CSR Write**: Write computed value to CSR file
 - Pass data to MEM/WB register
 
 ### 5. WB (Write Back)
@@ -265,16 +386,17 @@ CSRRCI rd, csr, imm   # rd = CSR; CSR &= ~imm
 
 #### `cpu.v` (Main CPU Module)
 - Top-level module integrating all components
-- Pipeline register management
-- Forwarding logic
-- PC control logic
-- Approximately 650 lines
+- Pipeline registers and forwarding logic
+- Next-PC selection (branches, jumps, traps)
+- ~670 lines
 
 #### `control_unit.v` (Control Unit)
-- Decodes instructions and generates control signals
-- Determines instruction type (R, I, S, B, U, J, CSR)
+- Generates all control signals from instruction fields
+- Determines instruction type (R, I, S, B, U, J, CSR, M-extension)
+- Detects M-extension via `funct7 == 7'b0000001`
+- Detects system instructions (ECALL, EBREAK, MRET)
 - Outputs control signals for all pipeline stages
-- 132 lines
+- ~140 lines
 
 #### `reg_file.v` (Register File)
 - 32 general-purpose registers (x0-x31)
@@ -283,18 +405,24 @@ CSRRCI rd, csr, imm   # rd = CSR; CSR &= ~imm
 
 #### `ALU.v` (Arithmetic Logic Unit)
 - Performs arithmetic and logic operations
-- Supports: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
-- Generates comparison flags for branches
+- **Base operations**: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
+- **M-extension operations**: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
+- Generates comparison flags for branches (alu_lt, alu_ltu, zero_flag)
+- Handles signed/unsigned multiplication with 64-bit intermediate results
+- Implements RISC-V-specified division edge cases
+- ~90 lines
 
 #### `csr_file.v` (CSR Register File)
-- Implements machine-mode CSRs
-- Provides cycle, time, and instret counters
-- Supports atomic CSR operations
+- Implements all machine-mode CSRs
+- 64-bit cycle and instret counters
+- Trap entry logic (saves mepc, mcause, updates mstatus)
+- MRET logic (restores mstatus)
+- Proper CSR write masking (only writable bits modified)
+- ~170 lines
 
 #### `definitions.v` (Constants)
-- ALU operation codes
-- CSR addresses
-- Other constant definitions
+- ALU operation codes (5-bit encoding for 18 operations)
+- ~20 lines
 
 ---
 
@@ -310,13 +438,16 @@ CSRRCI rd, csr, imm   # rd = CSR; CSR &= ~imm
 
 ```
 riscv_cpu/
-├── cpu.v                 # Main CPU module
-├── control_unit.v        # Control unit
-├── reg_file.v            # Register file
-├── ALU.v                 # Arithmetic Logic Unit
-├── csr_file.v            # CSR register file
-├── definitions.v         # Constants and definitions
-├── testbench.v           # Testbench (if available)
+├── src/
+│   ├── cpu.v             # Main CPU module
+│   ├── control_unit.v    # Control unit
+│   ├── reg_file.v        # Register file
+│   ├── ALU.v             # Arithmetic Logic Unit (with M-extension)
+│   ├── csr_file.v        # CSR register file
+│   └── definitions.v     # Constants and definitions
+├── test/
+│   ├── csr_tb.v          # CSR testbench
+│   └── m_ext_tb.v        # M-extension testbench
 └── README.md             # This file
 ```
 
@@ -325,68 +456,60 @@ riscv_cpu/
 #### Using Icarus Verilog
 
 ```bash
-# Compile
-iverilog -o cpu_sim cpu.v testbench.v
+# Run CSR tests
+iverilog -o csr_test test/csr_tb.v
+./csr_test
 
-# Run simulation
-./cpu_sim
+# Run M-extension tests
+iverilog -o m_ext_test test/m_ext_tb.v
+./m_ext_test
 
 # View waveforms
-gtkwave dump.vcd
-```
-
-#### Using ModelSim/QuestaSim
-
-```bash
-# Compile
-vlog cpu.v control_unit.v reg_file.v ALU.v csr_file.v definitions.v
-
-# Simulate
-vsim -c cpu_tb
-run -all
-
-# Or with GUI
-vsim cpu_tb
+gtkwave csr_test.vcd
 ```
 
 ### Example Test Program
 
 ```assembly
-# Simple test program
+# Test program with CSR and M-extension
 .text
 .global _start
 
 _start:
-    # Test arithmetic
-    li x1, 10
-    li x2, 20
-    add x3, x1, x2        # x3 = 30
+    # Setup trap handler
+    la t0, trap_handler
+    csrw mtvec, t0
     
-    # Test load/store
-    la x4, data
-    sw x3, 0(x4)
-    lw x5, 0(x4)          # x5 = 30
+    # Test M-extension
+    li x1, 7
+    li x2, 6
+    mul x3, x1, x2        # x3 = 42
     
-    # Test branch
-    beq x3, x5, success
-    j fail
-
-success:
-    li x6, 1              # Success indicator
+    li x4, 20
+    li x5, 6
+    div x6, x4, x5        # x6 = 3
+    rem x7, x4, x5        # x7 = 2
+    
+    # Read cycle counter
+    csrr x8, cycle
+    
+    # Test trap
+    ecall                 # Triggers trap
+    
+    # Should return here after MRET
+    li x9, 0xDEAD         # Success marker
     j end
 
-fail:
-    li x6, 0              # Failure indicator
+trap_handler:
+    # Simple trap handler
+    csrr t0, mcause       # Read cause
+    csrr t1, mepc         # Read exception PC
+    addi t1, t1, 4        # Skip past ECALL
+    csrw mepc, t1         # Write back
+    mret                  # Return
 
 end:
-    # Exit (if trap handler implemented)
-    li a7, 93
-    li a0, 0
-    ecall
-
-.data
-data:
-    .word 0
+    j end                 # Spin
 ```
 
 ---
@@ -404,7 +527,7 @@ The classic 5-stage pipeline provides a good balance between:
 
 Harvard architecture was chosen for:
 - **Simplicity**: No structural hazards on memory access
-- **Common in embedded**: Many RISC-V implementations use this architecture
+- **Common in embedded**: Many RISC-V implementations use this
 - **Better for FPGA**: Easier to implement with block RAM
 
 ### Data Forwarding Strategy
@@ -414,9 +537,27 @@ Data forwarding is implemented with:
 - **Priority**: EX/MEM (newer data) takes precedence
 - **Separate store forwarding**: rs2 for stores forwarded independently
 
-### CSR Implementation
+### M-Extension Implementation
 
-CSRs are implemented with (incomplete):
+The M-extension was implemented with the following considerations:
+
+- **Single-Cycle Operation**: All multiply/divide operations complete in one cycle
+- **Signed Arithmetic Handling**: Uses explicitly typed `wire signed` declarations
+- **RISC-V Specification Compliance**: Division by zero and signed overflow return defined values
+
+**Key Learning**: Verilog's `$signed()` cast in conditional assignments doesn't propagate signedness. Use declared signed wires:
+```verilog
+wire signed [31:0] signed_in1 = alu_in1;
+wire signed [31:0] signed_in2 = alu_in2;
+wire signed [31:0] signed_div = signed_in1 / signed_in2;
+```
+
+### Trap Handling Design
+
+Trap handling follows RISC-V privileged specification:
+- **Detection in MEM stage**: Allows precise exceptions
+- **Atomic state save**: mepc, mcause, mstatus updated together
+- **Priority over CSR writes**: Trap handling takes precedence
 
 ---
 
@@ -425,25 +566,76 @@ CSRs are implemented with (incomplete):
 ### Test Coverage
 
 The CPU has been tested with:
+
+#### RV32I Base
 - ✅ All arithmetic operations (R-type and I-type)
-- ✅ All load/store variants
-- ✅ All branch conditions
+- ✅ All load/store variants (LB, LH, LW, LBU, LHU, SB, SH, SW)
+- ✅ All 6 branch conditions (BEQ, BNE, BLT, BGE, BLTU, BGEU)
 - ✅ Jump instructions (JAL, JALR)
-- ✅ Upper immediate instructions
-- ✅ Data forwarding scenarios
-- 🚧 CSR operations (infrastructure in place, testing in progress)
+- ✅ Upper immediate instructions (LUI, AUIPC)
+- ✅ Data forwarding scenarios (EX-EX, MEM-EX)
 
-### Known Issues
+#### RV32M Extension
+- ✅ Multiply operations (MUL, MULH, MULHSU, MULHU)
+- ✅ Divide operations (DIV, DIVU)
+- ✅ Remainder operations (REM, REMU)
+- ✅ Edge cases (divide by zero, signed overflow)
 
-- **Control Hazards**: No branch prediction; assumes not taken
-- **Load-Use Hazard**: May require pipeline stalling (currently relies on careful code)
-- **CSR Operations**: Infrastructure in place but not yet fully integrated
-- **Exception Handling**: ECALL/EBREAK decoded but not fully functional
-- **Interrupts**: Interrupt logic not yet implemented
+#### CSR Operations
+- ✅ CSRRW, CSRRS, CSRRC (register variants)
+- ✅ CSRRWI, CSRRSI, CSRRCI (immediate variants)
+- ✅ Read-only behavior (rs1=x0 doesn't write)
+- ✅ Cycle counter reading
+- ✅ Instret counter reading
+- ✅ Machine info register reading
+
+#### Trap Handling
+- ✅ ECALL triggers trap
+- ✅ EBREAK triggers trap
+- ✅ mepc correctly saved
+- ✅ mcause correctly set
+- ✅ mstatus fields updated
+- ✅ MRET returns correctly
+
+### Test Results
+
+**M-Extension Tests:**
+```
+========================================
+M-Extension ALU Testbench
+========================================
+Test Summary: 29 passed, 0 failed
+ALL TESTS PASSED!
+```
+
+**CSR Tests:**
+```
+========================================
+CSR Testbench Started
+========================================
+Test 1: CSRRW read mscratch to t2 - PASS
+Test 2: CSRRS set bits in mstatus - PASS
+Test 3: CSRRC cleared bit 3 - PASS
+Test 4: CSRRWI wrote immediate - PASS
+Test 7: Cycle counter is incrementing - PASS
+Test 8: Instret counter is incrementing - PASS
+Test 9: Machine info registers readable - PASS
+Test 10: CSRRS with rs1=x0 read-only - PASS
+========================================
+```
+
+### Known Limitations
+
+- **No Branch Prediction**: Assumes not taken; 3-cycle penalty on taken branches
+- **No Load-Use Stalling**: Software must avoid load-use hazards or use NOPs
+- **Single-Cycle Division**: May limit maximum clock frequency on FPGA
+- **M-Mode Only**: No supervisor or user privilege levels
+- **No Interrupts**: Timer and external interrupts not yet implemented
 
 ### Debug Features
 
-- **Cycle Counter**: Tracks simulation cycles
+- **Cycle Counter**: 64-bit hardware cycle counter
+- **Instruction Counter**: 64-bit retired instruction counter
 - **Debug Registers**: Track instructions in each pipeline stage
 - **Waveform Support**: All signals accessible for debugging
 
@@ -452,31 +644,32 @@ The CPU has been tested with:
 ## 🔮 Future Enhancements
 
 ### Short Term
-- [ ] Complete CSR integration and testing
 - [ ] Pipeline stall logic for load-use hazards
-- [ ] Branch prediction (simple: always taken/not taken)
-- [ ] Complete exception handling
-- [ ] More comprehensive test suite
+- [ ] Branch prediction (static: backward taken, forward not taken)
+- [ ] Timer interrupts (CLINT)
 
 ### Medium Term
-- [ ] M extension (multiply/divide)
+- [x] ~~M extension (multiply/divide)~~ ✅ **Completed!**
+- [x] ~~CSR instructions~~ ✅ **Completed!**
+- [x] ~~Trap handling (ECALL/EBREAK/MRET)~~ ✅ **Completed!**
 - [ ] C extension (compressed instructions)
 - [ ] Privilege levels (S-mode, U-mode)
-- [ ] Virtual memory support
+- [ ] External interrupts (PLIC)
+- [ ] Multi-cycle divider (for improved timing)
 
 ### Long Term
-- [ ] F extension (single-precision floating point)
-- [ ] D extension (double-precision floating point)
 - [ ] A extension (atomic operations)
-- [ ] Multi-core support
+- [ ] Virtual memory (Sv32 MMU with TLB)
+- [ ] F extension (single-precision floating point)
+- [ ] Boot Linux!
 
 ---
 
 ## 📚 Resources
 
 ### RISC-V Specifications
-- [RISC-V ISA Manual](https://riscv.org/technical/specifications/)
-- [RISC-V Privileged Architecture](https://riscv.org/technical/specifications/)
+- [RISC-V ISA Manual Volume 1](https://riscv.org/technical/specifications/) - Unprivileged Specification
+- [RISC-V ISA Manual Volume 2](https://riscv.org/technical/specifications/) - Privileged Specification
 - [RISC-V Assembly Programmer's Manual](https://github.com/riscv/riscv-asm-manual)
 
 ### Learning Resources
@@ -492,13 +685,16 @@ The CPU has been tested with:
 
 ## 📊 Statistics
 
-- **Total Lines of Code**: ~1,200 lines (Verilog)
-- **Modules**: 6 core modules
-- **Instructions Fully Functional**: 40 (Complete RV32I base)
-- **Instructions In Progress**: 7 (CSR instructions)
-- **Pipeline Stages**: 5
-- **Pipeline Registers**: 4 sets
-- **CSRs Defined**: 11 (integration in progress)
+| Metric | Value |
+|--------|-------|
+| Total Lines of Code | ~1,100 lines (Verilog) |
+| Core Modules | 6 |
+| Instructions Implemented | 54 (RV32IM + CSR + System) |
+| Pipeline Stages | 5 |
+| Pipeline Registers | 4 sets |
+| ALU Operations | 18 (10 base + 8 M-extension) |
+| CSRs Implemented | 15 |
+| Forwarding Paths | 3 (ALU in1, ALU in2, Store data) |
 
 ---
 
@@ -535,7 +731,5 @@ For questions or suggestions about this project, please open an issue on GitHub.
 
 ---
 
-*Last Updated: November 2025*
-*Project Status: Active Development*
-
-
+*Last Updated: January 2026*  
+*Project Status: Active Development - RV32IM with Trap Handling Complete*
