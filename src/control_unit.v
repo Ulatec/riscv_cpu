@@ -8,7 +8,7 @@ module control_unit(
     input [4:0]  rs1,         // instruction[19:15] (for CSR immediate)
     input [4:0]  rs2,
     // Outputs - Control signals
-    output reg [3:0]  alu_op,
+    output reg [4:0]  alu_op,
     output reg [1:0]  alu_in1_src,
     output reg        alusrc,
     output reg        mem_read,

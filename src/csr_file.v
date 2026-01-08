@@ -17,7 +17,15 @@ module csr_file(
     //counters from CPU
     input [31:0] cycle_count,
     input retire_inst,
-    input mret_taken
+    input mret_taken,
+    // Interrupt inputs
+    input         timer_irq,       // Timer interrupt pending from CLINT
+    input         external_irq,    // External interrupt (for future use)
+    input         software_irq,    // Software interrupt (for future use)
+    
+    // Interrupt output (active when interrupt should be taken)
+    output        interrupt_pending,  // An enabled interrupt is pending
+    output [31:0] interrupt_cause    // Cause code for pending interrupt
 );
 
 //Hardware Info Registers
@@ -43,6 +51,36 @@ reg[31:0] mip;      // 0x344 - Interrupt pending
 reg[63:0] cycle_counter;    // 0xC00/0xC80 - Cycle counter
 reg[63:0] instr_ret_counter;// 0xC02/0xC82 - Instructions retired counter
 
+// mip reflects actual interrupt sources
+// MTIP (bit 7) comes from CLINT timer_irq
+// MSIP (bit 3) and MEIP (bit 11) for future use
+wire [31:0] mip_actual;
+localparam MIE_BIT  = 3;   // Machine Interrupt Enable
+localparam MPIE_BIT = 7;   // Machine Previous Interrupt Enable
+localparam MPP_LO   = 11;  // Machine Previous Privilege (low bit)
+localparam MPP_HI   = 12;  // Machine Previous Privilege (high bit)
+localparam MSIP_BIT = 3;   // Machine Software Interrupt
+localparam MTIP_BIT = 7;   // Machine Timer Interrupt  
+localparam MEIP_BIT = 11;  // Machine External Interrupt
+assign mip_actual[MSIP_BIT] = software_irq;
+assign mip_actual[MTIP_BIT] = timer_irq;
+assign mip_actual[MEIP_BIT] = external_irq;
+// All other bits from software-written mip
+assign mip_actual[2:0]   = mip[2:0];
+assign mip_actual[6:4]   = mip[6:4];
+assign mip_actual[10:8]  = mip[10:8];
+assign mip_actual[31:12] = mip[31:12];
+localparam MCAUSE_MSI = 32'h80000003;  // Machine Software Interrupt
+localparam MCAUSE_MTI = 32'h80000007;  // Machine Timer Interrupt
+localparam MCAUSE_MEI = 32'h8000000B;  // Machine External Interrupt
+wire msi_pending = mip_actual[MSIP_BIT] & mie[MSIP_BIT] & mstatus[MIE_BIT];
+wire mti_pending = mip_actual[MTIP_BIT] & mie[MTIP_BIT] & mstatus[MIE_BIT];
+wire mei_pending = mip_actual[MEIP_BIT] & mie[MEIP_BIT] & mstatus[MIE_BIT];
+assign interrupt_pending = msi_pending | mti_pending | mei_pending;    
+assign interrupt_cause = mei_pending ? MCAUSE_MEI :
+                             msi_pending ? MCAUSE_MSI :
+                             mti_pending ? MCAUSE_MTI :
+                             32'h0;
 //Initialize CSRs
 initial begin
    mvendorid = 32'h0;

@@ -3,6 +3,7 @@
  `include "../src/csr_file.v"
 `include "../src/definitions.v" 
 `include "../src/control_unit.v"
+`include "../src/clint.v"
 module cpu(
     input rst, clk,
       // Instruction memory (read-only)
@@ -47,7 +48,7 @@ initial begin
   reg [4:0]  id_ex_rs2_addr;    // rs2 address
   reg [4:0]  id_ex_rd_addr;     // Destination register address
   // Control Signals (Generated in ID, used in EX/MEM/WB)
-  reg [3:0]  id_ex_alu_op;      // ALU operation code
+  reg [4:0]  id_ex_alu_op;      // ALU operation code
   reg [1:0] id_ex_alu_in1_src;
   reg        id_ex_alusrc;      // Mux select for ALU input 2 (0=rs2_data, 1=immediate)
   reg        id_ex_mem_read;    // Enable memory read in MEM stage
@@ -101,6 +102,52 @@ reg id_ex_is_mret;
     reg [2:0] ForwardB;
   // Immediate Mux (Select correct immediate based on type) - Combinational in ID
   reg [31:0] immediate_id; // Use reg because assigned in always block
+// CLINT interface wires
+wire        clint_timer_irq;      // Timer interrupt from CLINT
+wire [31:0] clint_rdata;          // Read data from CLINT
+wire        clint_addr_valid;     // Address is in CLINT region
+// Interrupt signals from CSR file
+wire        interrupt_pending;     // An enabled interrupt is waiting
+wire [31:0] interrupt_cause;       // Cause code for the interrupt
+wire        plic_external_irq;    // External interrupt from PLIC
+wire [31:0] plic_rdata;           // Read data from PLIC
+wire        plic_addr_valid;      // Address is in PLIC region
+wire [31:0] external_irq_sources = 32'b0;  // TODO: Connect UART, GPIO, etc.
+
+clint clint_inst (
+    .clk(clk),
+    .rst(rst),
+    
+    // Connect to data memory interface (MEM stage)
+    .addr(ex_mem_alu_result),      // Address from EX/MEM (load/store address)
+    .wdata(ex_mem_rs2_data),       // Write data
+    .wstrb(mem_wstrb),             // Write strobes (already calculated)
+    .read_en(ex_mem_mem_read),     // Read enable
+    .rdata(clint_rdata),           // Read data output
+    .addr_valid(clint_addr_valid), // Is this a CLINT address?
+    
+    // Interrupt output
+    .timer_irq(clint_timer_irq)
+);
+
+plic plic_inst (
+    .clk(clk),
+    .rst(rst),
+    
+    // Memory interface (MEM stage)
+    .addr(ex_mem_alu_result),      // Address from EX/MEM
+    .wdata(ex_mem_rs2_data),       // Write data
+    .wstrb(mem_wstrb),             // Write strobes
+    .read_en(ex_mem_mem_read),     // Read enable
+    .rdata(plic_rdata),            // Read data output
+    .addr_valid(plic_addr_valid),  // Is this a PLIC address?
+    
+    // Interrupt sources from peripherals
+    .irq_sources(external_irq_sources),
+    
+    // Interrupt output to CPU
+    .external_irq(plic_external_irq)
+);
   always @(*) begin
       // Default to I-type, modify as needed
       immediate_id = imm_i; // Common case
@@ -118,7 +165,7 @@ reg id_ex_is_mret;
 
 
 // Control signals
-wire [3:0] alu_op_ctrl;
+wire [4:0] alu_op_ctrl;
 wire [1:0] ctrl_alu_in1_src;
 wire alusrc_ctrl, mem_read_ctrl, mem_write_ctrl;
 wire reg_write_ctrl, mem_to_reg_ctrl;
@@ -149,6 +196,11 @@ control_unit control_inst(
     .is_mret(is_mret_ctrl)
 );
 wire [31:0] csr_rdata; 
+// NEW: Combined trap cause - use exception cause OR interrupt cause
+wire [31:0] trap_cause_final = exception_taken ? exception_cause : interrupt_cause;
+
+// NEW: Combined trap PC - different for exceptions vs interrupts!
+wire [31:0] trap_pc_final = exception_taken ? exception_pc : interrupt_pc;
 csr_file csr_file_inst(
     .clk(clk),
     .rst(rst),
@@ -158,12 +210,20 @@ csr_file csr_file_inst(
     .csr_waddr(mem_wb_csr_addr),
     .csr_wdata(mem_wb_csr_wdata),
         // Trap handling (MEM stage)
-    .trap_taken(trap_taken),
-    .trap_cause(trap_cause),
-    .trap_pc(trap_pc),
+    .trap_taken(take_trap),
+    .trap_cause(trap_cause_final),
+    .trap_pc(trap_pc_final),
     .cycle_count(cycle),
     .retire_inst(retire_inst),
-    .mret_taken(ex_mem_is_mret)
+    .mret_taken(ex_mem_is_mret),
+        // NEW: Interrupt inputs
+    .timer_irq(clint_timer_irq),   // From CLINT
+    .external_irq(plic_external_irq),           // Not implemented yet
+    .software_irq(1'b0),           // Not implemented yet
+    
+    // NEW: Interrupt outputs
+    .interrupt_pending(interrupt_pending),
+    .interrupt_cause(interrupt_cause)
 );
 
 wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM stage
@@ -270,12 +330,6 @@ reg        mem_wb_isJALR;
 
   // Branching Logic (will use ALU result/flags in EX/MEM stage)
 assign take_branch_condition = ex_mem_isBtype && branch_taken;
-wire trap_taken = ex_mem_is_ecall || ex_mem_is_ebreak;
-// Trap cause codes (defined in RISC-V spec)
-wire [31:0] trap_cause = ex_mem_is_ebreak ? 32'd3 :   // Breakpoint
-                         ex_mem_is_ecall  ? 32'd11 :  // Environment call from M-mode
-                         32'd0;
-wire [31:0] trap_pc = ex_mem_pcplus4 - 4;  // Reconstruct PC of trapping instruction
 
   reg [31:0] branch_addr;
   // PC Calculation Logic for branches/jumps (Part of EX stage)
@@ -298,14 +352,38 @@ wire [31:0] trap_pc = ex_mem_pcplus4 - 4;  // Reconstruct PC of trapping instruc
   wire LOAD_sign_mem = !ex_mem_funct3[2];
 
   // 4. Format the final data
-  wire [31:0] load_data_formatted =
-      mem_byteAccess_mem     ? {{24{LOAD_sign_mem & LOAD_byte_mem[7]}}, LOAD_byte_mem} :
-      mem_halfwordAccess_mem ? {{16{LOAD_sign_mem & LOAD_halfword_mem[15]}}, LOAD_halfword_mem} :
-      mem_rdata; // Default to full word (LW); // Needs registered address LSBs from EX/MEM
+wire [31:0] load_data_formatted =
+    mem_byteAccess_mem     ? {{24{LOAD_sign_mem & LOAD_byte_mem[7]}}, LOAD_byte_mem} :
+    mem_halfwordAccess_mem ? {{16{LOAD_sign_mem & LOAD_halfword_mem[15]}}, LOAD_halfword_mem} :
+    mem_rdata_muxed;  // <-- Changed from mem_rdata
 wire is_instruction_fetch = (mem_addr == pc_reg);
   // Memory Interface signals (Control needed based on EX/MEM register values)
 wire mem_access_in_mem_stage = ex_mem_mem_read || ex_mem_mem_write;
 
+wire exception_taken = ex_mem_is_ecall || ex_mem_is_ebreak;
+
+// Exception cause codes (RISC-V spec)
+wire [31:0] exception_cause = ex_mem_is_ebreak ? 32'd3 :   // Breakpoint
+                              ex_mem_is_ecall  ? 32'd11 :  // ECALL from M-mode
+                              32'd0;
+
+// Exception PC: PC of the faulting instruction
+wire [31:0] exception_pc = ex_mem_pcplus4 - 4;
+
+// Interrupt detection: only take if enabled and no exception this cycle
+wire can_take_interrupt = interrupt_pending && 
+                          !exception_taken && 
+                          !ex_mem_is_mret;
+
+// Interrupt PC: PC of the NEXT instruction (to resume after handler)
+wire [31:0] interrupt_pc = ex_mem_pcplus4;
+
+// Combined trap signal
+wire take_trap = exception_taken || can_take_interrupt;
+
+// Final cause and PC sent to CSR file (mux between exception and interrupt)
+wire [31:0] trap_cause = exception_taken ? exception_cause : interrupt_cause;
+wire [31:0] trap_pc    = exception_taken ? exception_pc    : interrupt_pc;
 // INSTRUCTION MEMORY INTERFACE (for fetch)
 assign imem_addr = pc_reg;  // Always fetch from PC
 assign imem_rstrb = 1'b1;   // Always fetching
@@ -375,20 +453,22 @@ assign csr_wdata_wb = mem_wb_csr_wdata;
   assign mtvec_value = csr_file_inst.mtvec;  // Direct access to CSR
   assign mepc_value = csr_file_inst.mepc;
   assign next_pc = 
-  (trap_taken) ? mtvec_value :  
-  (ex_mem_is_mret)  ? mepc_value :     // MRET returns to mepc
-  (ex_mem_isJALR) ? (ex_mem_alu_result & 32'hFFFFFFFE) : // JALR target (mask LSB)
-                 (take_branch_condition) ? ex_mem_branch_target :      // Taken Branch target
-                 (ex_mem_isJAL) ? ex_mem_branch_target :          // JAL target
-                 pcplus4_if;
+    (take_trap)              ? mtvec_value :                          // Trap (exception or interrupt)
+    (ex_mem_is_mret)         ? mepc_value :                           // Return from trap
+    (ex_mem_isJALR)          ? (ex_mem_alu_result & 32'hFFFFFFFE) :   // JALR
+    (take_branch_condition)  ? ex_mem_branch_target :                 // Taken branch
+    (ex_mem_isJAL)           ? ex_mem_branch_target :                 // JAL
+    pcplus4_if;                                                       // Normal: PC+4
 
-
+wire pipeline_flush = take_trap || take_branch_condition || 
+                      ex_mem_isJAL || ex_mem_isJALR || ex_mem_is_mret;
   // Sequential Logic (Clocking PC, IF/ID, ID/EX Registers)
   always @(posedge clk or posedge rst) begin
-      if (rst) begin
+      if (rst || pipeline_flush) begin
           // PC Reset
-          pc_reg            <= 32'b0;
-
+          if(rst)begin
+            pc_reg            <= 32'b0;
+          end
           // IF/ID Reset
           if_id_instruction <= 32'h00000013; // Reset to NOP
           if_id_pcplus4     <= 32'b0;
@@ -408,10 +488,10 @@ assign csr_wdata_wb = mem_wb_csr_wdata;
           id_ex_mem_to_reg  <= 1'b0;
           id_ex_funct3      <= 3'b0;
           ex_mem_csr_wdata  <= 32'b0;
-ex_mem_csr_addr   <= 12'b0;
-ex_mem_is_csr     <= 1'b0;
-ex_mem_csr_write  <= 1'b0;
-ex_mem_csr_rdata  <= 32'b0;
+  ex_mem_csr_addr   <= 12'b0;
+  ex_mem_is_csr     <= 1'b0;
+  ex_mem_csr_write  <= 1'b0;
+  ex_mem_csr_rdata  <= 32'b0;
         ex_mem_alu_lt     <= 1'b0;          
         ex_mem_alu_ltu    <= 1'b0;          
           ex_mem_alu_result <= 32'b0;
@@ -435,9 +515,9 @@ ex_mem_csr_rdata  <= 32'b0;
         mem_wb_pcplus4   <= 32'b0;
         mem_wb_csr_rdata <= 32'b0;
         mem_wb_csr_wdata <= 32'b0;
-mem_wb_csr_addr  <= 12'b0;
-mem_wb_csr_write <= 1'b0;
-mem_wb_is_csr    <= 1'b0;
+  mem_wb_csr_addr  <= 12'b0;
+  mem_wb_csr_write <= 1'b0;
+  mem_wb_is_csr    <= 1'b0;
         id_ex_isJAL <= 1'b0;
         id_ex_isJALR <= 1'b0;
         ex_mem_isBtype <= 1'b0;
@@ -456,6 +536,8 @@ mem_wb_is_csr    <= 1'b0;
       id_ex_is_ebreak   <= 1'b0;
       id_ex_is_mret  <= 1'b0;
       end else begin
+      
+
           // --- Clock PC ---
           pc_reg            <= next_pc;
 
@@ -486,19 +568,19 @@ mem_wb_is_csr    <= 1'b0;
           ex_mem_zero_flag  <= zero_flag;
           ex_mem_csr_wdata  <= csr_wdata_computed;
           id_ex_csr_addr    <= csr_addr;           // Latch CSR address
-id_ex_is_csr      <= is_csr_ctrl;        // Latch CSR flag
-id_ex_is_csr_imm  <= funct3_id[2];       // Immediate variant flag
-id_ex_is_ecall    <= is_ecall_ctrl;      // Latch ECALL flag
-id_ex_is_ebreak   <= is_ebreak_ctrl;     // Latch EBREAK flag
-ex_mem_csr_addr   <= id_ex_csr_addr;
-ex_mem_is_csr     <= id_ex_is_csr;
-ex_mem_csr_write  <= csr_should_write_ex;
-ex_mem_csr_rdata  <= csr_rdata;
-ex_mem_is_ecall   <= id_ex_is_ecall;    
-ex_mem_is_ebreak  <= id_ex_is_ebreak;   
+  id_ex_is_csr      <= is_csr_ctrl;        // Latch CSR flag
+  id_ex_is_csr_imm  <= funct3_id[2];       // Immediate variant flag
+  id_ex_is_ecall    <= is_ecall_ctrl;      // Latch ECALL flag
+  id_ex_is_ebreak   <= is_ebreak_ctrl;     // Latch EBREAK flag
+  ex_mem_csr_addr   <= id_ex_csr_addr;
+  ex_mem_is_csr     <= id_ex_is_csr;
+  ex_mem_csr_write  <= csr_should_write_ex;
+  ex_mem_csr_rdata  <= csr_rdata;
+  ex_mem_is_ecall   <= id_ex_is_ecall;    
+  ex_mem_is_ebreak  <= id_ex_is_ebreak;   
           // Pass control signals through
           ex_mem_alu_lt     <= alu_lt;            
-ex_mem_alu_ltu    <= alu_ltu;           
+  ex_mem_alu_ltu    <= alu_ltu;           
           ex_mem_mem_read   <= id_ex_mem_read;
           ex_mem_mem_write  <= id_ex_mem_write;
           ex_mem_reg_write  <= id_ex_reg_write;
@@ -511,7 +593,7 @@ ex_mem_alu_ltu    <= alu_ltu;
           ex_mem_isJALR <= id_ex_isJALR;
           ex_mem_isJAL <= id_ex_isJAL;
           ex_mem_branch_target <= branch_target_ex;
-          mem_wb_mem_data   <= mem_rdata;
+          mem_wb_mem_data   <= mem_rdata_muxed;
 id_ex_is_mret <= is_mret_ctrl;
 ex_mem_is_mret <= id_ex_is_mret;
         // Pass through values from previous stage (EX/MEM)
@@ -585,7 +667,13 @@ mem_wb_is_csr     <= ex_mem_is_csr;
         end
     end
  end
- 
+wire [31:0] mem_rdata_muxed = clint_addr_valid ? clint_rdata :
+                              plic_addr_valid  ? plic_rdata  :
+                              mem_rdata;
+
+// Then update the existing logic to use mem_rdata_muxed:
+
+
  // Separate forwarding for store data (always check rs2 for stores, regardless of alusrc)
  reg [1:0] ForwardStore;
  always @(*) begin
