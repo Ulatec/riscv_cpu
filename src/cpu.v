@@ -4,6 +4,7 @@
 `include "../src/definitions.v" 
 `include "../src/control_unit.v"
 `include "../src/clint.v"
+`include "../src/plic.v"
 module cpu(
     input rst, clk,
       // Instruction memory (read-only)
@@ -16,7 +17,10 @@ module cpu(
     output [31:0] mem_wdata, // Data to write to memory (Store data)
     output mem_rstrb,        // Memory read strobe/enable
     output reg [31:0] cycle, // Keep for testbench for now
-    output [3:0] mem_wstrb   // Memory write strobe (byte enables)
+    output [3:0] mem_wstrb,  // Memory write strobe (byte enables)
+
+    // External interrupt sources for PLIC
+    input [31:0] external_irq_sources
   );
 
   reg [31:0] debug_id_instruction;  // Instruction leaving ID stage (entering EX)
@@ -112,7 +116,7 @@ wire [31:0] interrupt_cause;       // Cause code for the interrupt
 wire        plic_external_irq;    // External interrupt from PLIC
 wire [31:0] plic_rdata;           // Read data from PLIC
 wire        plic_addr_valid;      // Address is in PLIC region
-wire [31:0] external_irq_sources = 32'b0;  // TODO: Connect UART, GPIO, etc.
+// external_irq_sources comes from module port (connected by soc.v)
 
 clint clint_inst (
     .clk(clk),
