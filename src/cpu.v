@@ -5,6 +5,7 @@
 `include "../src/control_unit.v"
 `include "../src/clint.v"
 `include "../src/plic.v"
+`include "../src/atomic_unit.v"
 module cpu(
     input rst, clk,
       // Instruction memory (read-only)
@@ -71,6 +72,11 @@ reg        id_ex_is_csr_imm; //
   // Store instruction type information if needed later (optional but helpful)
   reg [2:0]  id_ex_funct3;      // Pass funct3 for Load/Store byte/halfword handling
 reg id_ex_is_mret;
+// Atomic pipeline registers (ID/EX)
+reg        id_ex_is_lr;
+reg        id_ex_is_sc;
+reg        id_ex_is_amo;
+reg [4:0]  id_ex_amo_funct5;
 
   //********* Wires for interfacing with Reg File and ALU *******//
   wire [31:0] rs1_data;      // Output from Reg File (ID stage)
@@ -117,6 +123,39 @@ wire        plic_external_irq;    // External interrupt from PLIC
 wire [31:0] plic_rdata;           // Read data from PLIC
 wire        plic_addr_valid;      // Address is in PLIC region
 // external_irq_sources comes from module port (connected by soc.v)
+
+// =========================================================================
+// Atomic Unit
+// =========================================================================
+wire [31:0] atomic_mem_wdata;
+wire [31:0] atomic_rd_data;
+wire        atomic_sc_success;
+wire        atomic_do_mem_write;
+wire        atomic_reservation_valid;
+wire [31:0] atomic_reservation_addr;
+
+wire is_atomic_mem = ex_mem_is_lr || ex_mem_is_sc || ex_mem_is_amo;
+wire clear_atomic_reservation = take_trap;
+
+atomic_unit atomic_unit_inst (
+    .clk(clk),
+    .rst(rst),
+    .amo_op(ex_mem_amo_funct5),
+    .is_lr(ex_mem_is_lr),
+    .is_sc(ex_mem_is_sc),
+    .is_amo(ex_mem_is_amo),
+    .addr(ex_mem_alu_result),
+    .rs2_data(ex_mem_rs2_data),
+    .mem_rdata(mem_rdata),
+    .mem_wdata(atomic_mem_wdata),
+    .rd_data(atomic_rd_data),
+    .sc_success(atomic_sc_success),
+    .do_mem_write(atomic_do_mem_write),
+    .clear_reservation(clear_atomic_reservation),
+    .enable(1'b1),  // Always enabled (no MMU stalls yet)
+    .reservation_valid(atomic_reservation_valid),
+    .reservation_addr(atomic_reservation_addr)
+);
 
 clint clint_inst (
     .clk(clk),
@@ -177,6 +216,8 @@ wire is_branch_ctrl, is_jal_ctrl, is_jalr_ctrl;
 wire is_csr_ctrl, is_ecall_ctrl, is_ebreak_ctrl;  
 wire retire_inst;
 wire is_mret_ctrl;
+wire is_lr_ctrl, is_sc_ctrl, is_amo_ctrl;
+wire [4:0] amo_funct5_ctrl;
 control_unit control_inst(
     .opcode(opcode_id),
     .funct3(funct3_id),
@@ -197,7 +238,11 @@ control_unit control_inst(
     .is_csr(is_csr_ctrl),    
     .is_ecall(is_ecall_ctrl),    
     .is_ebreak(is_ebreak_ctrl),
-    .is_mret(is_mret_ctrl)
+    .is_mret(is_mret_ctrl),
+    .is_lr(is_lr_ctrl),
+    .is_sc(is_sc_ctrl),
+    .is_amo(is_amo_ctrl),
+    .amo_funct5(amo_funct5_ctrl)
 );
 wire [31:0] csr_rdata; 
 // NEW: Combined trap cause - use exception cause OR interrupt cause
@@ -302,8 +347,13 @@ reg [11:0] ex_mem_csr_addr;      // CSR address
 reg        ex_mem_is_csr;        // Is this a CSR instruction?
 reg        ex_mem_csr_write;     // Should CSR be written?
 reg [31:0] ex_mem_csr_rdata;     // CSR read data (for writeback)
-reg        ex_mem_is_ecall;   
-reg        ex_mem_is_ebreak;   
+reg        ex_mem_is_ecall;
+reg        ex_mem_is_ebreak;
+// Atomic pipeline registers (EX/MEM)
+reg        ex_mem_is_lr;
+reg        ex_mem_is_sc;
+reg        ex_mem_is_amo;
+reg [4:0]  ex_mem_amo_funct5;
     wire is_beq  = (ex_mem_funct3 == 3'b000);  // Branch if equal
     wire is_bne  = (ex_mem_funct3 == 3'b001);  // Branch if not equal
     wire is_blt  = (ex_mem_funct3 == 3'b100);  // Branch if less than (signed)
@@ -331,6 +381,9 @@ reg        mem_wb_isJALR;
   // Control Signals passed from EX/MEM
   reg        mem_wb_reg_write;   // Register write enable
   reg        mem_wb_mem_to_reg;  // Writeback data mux select
+  // Atomic pipeline registers (MEM/WB)
+  reg [31:0] mem_wb_atomic_data;
+  reg        mem_wb_is_atomic;
 
   // Branching Logic (will use ALU result/flags in EX/MEM stage)
 assign take_branch_condition = ex_mem_isBtype && branch_taken;
@@ -394,7 +447,7 @@ assign imem_rstrb = 1'b1;   // Always fetching
 
 // DATA MEMORY INTERFACE (for loads/stores only)
 assign mem_addr = ex_mem_alu_result;  // Data address from ALU
-assign mem_rstrb = ex_mem_mem_read;   // Read strobe for loads
+assign mem_rstrb = ex_mem_mem_read || ex_mem_is_lr || ex_mem_is_sc || ex_mem_is_amo;
   
 // Use instruction memory for fetches
 wire [31:0] instruction_from_mem = imem_rdata; // Get instruction from imem interface
@@ -403,7 +456,7 @@ assign aligned_store_data =
     (ex_mem_funct3 == 3'b010) ? ex_mem_rs2_data :              // SW
     (ex_mem_funct3 == 3'b001) ? {2{ex_mem_rs2_data[15:0]}} :   // SH
     {4{ex_mem_rs2_data[7:0]}};       
-  assign mem_wdata = aligned_store_data;
+  assign mem_wdata = is_atomic_mem ? atomic_mem_wdata : aligned_store_data;
   // Store byte enables based on funct3 and address
 wire [3:0] store_byte_enables;
 assign store_byte_enables = 
@@ -416,7 +469,9 @@ assign store_byte_enables =
             (ex_mem_alu_result[0] ? 4'b0010 : 4'b0001)
         ) :
     4'b0000;
-assign mem_wstrb = ex_mem_mem_write ? store_byte_enables : 4'b0000;
+wire normal_mem_write = ex_mem_mem_write && !is_atomic_mem;
+assign mem_wstrb = (normal_mem_write || atomic_do_mem_write) ?
+                   (is_atomic_mem ? 4'b1111 : store_byte_enables) : 4'b0000;
 // CSR write signals (from WB stage)
 assign csr_write_wb = mem_wb_csr_write;
 assign csr_waddr_wb = mem_wb_csr_addr;
@@ -539,6 +594,16 @@ wire pipeline_flush = take_trap || take_branch_condition ||
       id_ex_is_ecall    <= 1'b0;
       id_ex_is_ebreak   <= 1'b0;
       id_ex_is_mret  <= 1'b0;
+      id_ex_is_lr       <= 1'b0;
+      id_ex_is_sc       <= 1'b0;
+      id_ex_is_amo      <= 1'b0;
+      id_ex_amo_funct5  <= 5'b0;
+      ex_mem_is_lr      <= 1'b0;
+      ex_mem_is_sc      <= 1'b0;
+      ex_mem_is_amo     <= 1'b0;
+      ex_mem_amo_funct5 <= 5'b0;
+      mem_wb_atomic_data <= 32'b0;
+      mem_wb_is_atomic  <= 1'b0;
       end else begin
       
 
@@ -599,7 +664,15 @@ wire pipeline_flush = take_trap || take_branch_condition ||
           ex_mem_branch_target <= branch_target_ex;
           mem_wb_mem_data   <= mem_rdata_muxed;
 id_ex_is_mret <= is_mret_ctrl;
+id_ex_is_lr       <= is_lr_ctrl;
+id_ex_is_sc       <= is_sc_ctrl;
+id_ex_is_amo      <= is_amo_ctrl;
+id_ex_amo_funct5  <= amo_funct5_ctrl;
 ex_mem_is_mret <= id_ex_is_mret;
+ex_mem_is_lr      <= id_ex_is_lr;
+ex_mem_is_sc      <= id_ex_is_sc;
+ex_mem_is_amo     <= id_ex_is_amo;
+ex_mem_amo_funct5 <= id_ex_amo_funct5;
         // Pass through values from previous stage (EX/MEM)
         mem_wb_alu_result <= ex_mem_alu_result;
         mem_wb_rd_addr    <= ex_mem_rd_addr;
@@ -610,6 +683,8 @@ mem_wb_csr_wdata  <= ex_mem_csr_wdata;
 mem_wb_csr_addr   <= ex_mem_csr_addr;
 mem_wb_csr_write  <= ex_mem_csr_write;
 mem_wb_is_csr     <= ex_mem_is_csr;
+mem_wb_atomic_data <= atomic_rd_data;
+mem_wb_is_atomic  <= is_atomic_mem;
           // MEM/WB latches
           ex_mem_pcplus4 <= id_ex_pcplus4;
             mem_wb_pcplus4 <= ex_mem_pcplus4;
@@ -711,8 +786,9 @@ wire [31:0] mem_rdata_muxed = clint_addr_valid ? clint_rdata :
     wire        mem_to_reg_wb = mem_wb_mem_to_reg; // MemToReg signal from MEM/WB reg
 
     // Register file write back data mux (Combinational - WB stage)
-assign write_data_to_reg = mem_wb_is_csr ? mem_wb_csr_rdata :
-                          (mem_wb_mem_to_reg ? mem_wb_mem_data : wb_data);
+assign write_data_to_reg = mem_wb_is_atomic ? mem_wb_atomic_data :
+                           mem_wb_is_csr ? mem_wb_csr_rdata :
+                           (mem_wb_mem_to_reg ? mem_wb_mem_data : wb_data);
 // Extended debug monitoring
 always @(posedge clk) begin
   if (!rst && cycle >= 1 && cycle <= 9) begin

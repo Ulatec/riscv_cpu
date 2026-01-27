@@ -23,9 +23,21 @@ module control_unit(
     output reg        is_csr,
     output reg        is_ecall,
     output reg        is_ebreak,
-    output reg        is_mret
+    output reg        is_mret,
+    // Atomic (A extension)
+    output wire       is_lr,
+    output wire       is_sc,
+    output wire       is_amo,
+    output wire [4:0] amo_funct5
 );
 wire is_mext = (funct7 == 7'b0000001);
+
+// Atomic instruction detection
+wire is_atomic = (opcode == 5'b01011);        // AMO opcode
+assign amo_funct5 = funct7[6:2];              // instruction[31:27]
+assign is_lr  = is_atomic && (amo_funct5 == 5'b00010);
+assign is_sc  = is_atomic && (amo_funct5 == 5'b00011);
+assign is_amo = is_atomic && !is_lr && !is_sc;
 // Control Unit Logic (Combinational)
     always @(*) begin
         // Default values
@@ -137,6 +149,14 @@ wire is_mext = (funct7 == 7'b0000001);
                     alusrc = (funct3[2]);
                 end
             end
+            5'b01011: begin // Atomic (LR.W, SC.W, AMO*.W)
+                reg_write  = 1'b1;      // All atomic ops write to rd
+                alusrc     = 1'b1;      // Immediate (0) for address passthrough
+                mem_read   = 1'b1;      // Read memory (LR loads, AMO reads before modify)
+                mem_to_reg = 1'b1;      // Result comes through memory/atomic path
+                alu_op     = `ALU_ADD;  // Address = rs1 + 0
+            end
+
             5'b00100: begin // I-type arithmetic (ADDI, XORI, SLLI, etc.)
                 reg_write = 1'b1;
                 alusrc = 1'b1;
