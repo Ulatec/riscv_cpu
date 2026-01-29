@@ -72,6 +72,7 @@ reg        id_ex_is_csr_imm; //
   // Store instruction type information if needed later (optional but helpful)
   reg [2:0]  id_ex_funct3;      // Pass funct3 for Load/Store byte/halfword handling
 reg id_ex_is_mret;
+reg id_ex_is_sret;
 // Atomic pipeline registers (ID/EX)
 reg        id_ex_is_lr;
 reg        id_ex_is_sc;
@@ -116,9 +117,18 @@ reg [4:0]  id_ex_amo_funct5;
 wire        clint_timer_irq;      // Timer interrupt from CLINT
 wire [31:0] clint_rdata;          // Read data from CLINT
 wire        clint_addr_valid;     // Address is in CLINT region
+wire [63:0] clint_mtime;          // mtime value for TIME CSR
 // Interrupt signals from CSR file
 wire        interrupt_pending;     // An enabled interrupt is waiting
 wire [31:0] interrupt_cause;       // Cause code for the interrupt
+// Privilege and trap routing from CSR file
+wire [1:0]  priv_level;           // Current privilege level
+wire [31:0] trap_vector;          // Trap handler address (mtvec or stvec)
+wire [31:0] trap_return_pc;       // Return address (mepc or sepc)
+wire        trap_to_s_mode;       // Trap goes to S-mode
+wire [31:0] satp_value;           // SATP for future MMU
+wire        mstatus_mxr;          // Make eXecutable Readable
+wire        mstatus_sum;          // Supervisor User Memory access
 wire        plic_external_irq;    // External interrupt from PLIC
 wire [31:0] plic_rdata;           // Read data from PLIC
 wire        plic_addr_valid;      // Address is in PLIC region
@@ -170,7 +180,8 @@ clint clint_inst (
     .addr_valid(clint_addr_valid), // Is this a CLINT address?
     
     // Interrupt output
-    .timer_irq(clint_timer_irq)
+    .timer_irq(clint_timer_irq),
+    .mtime_out(clint_mtime)
 );
 
 plic plic_inst (
@@ -216,6 +227,7 @@ wire is_branch_ctrl, is_jal_ctrl, is_jalr_ctrl;
 wire is_csr_ctrl, is_ecall_ctrl, is_ebreak_ctrl;  
 wire retire_inst;
 wire is_mret_ctrl;
+wire is_sret_ctrl;
 wire is_lr_ctrl, is_sc_ctrl, is_amo_ctrl;
 wire [4:0] amo_funct5_ctrl;
 control_unit control_inst(
@@ -239,6 +251,7 @@ control_unit control_inst(
     .is_ecall(is_ecall_ctrl),    
     .is_ebreak(is_ebreak_ctrl),
     .is_mret(is_mret_ctrl),
+    .is_sret(is_sret_ctrl),
     .is_lr(is_lr_ctrl),
     .is_sc(is_sc_ctrl),
     .is_amo(is_amo_ctrl),
@@ -258,21 +271,35 @@ csr_file csr_file_inst(
     .csr_write(mem_wb_csr_write),
     .csr_waddr(mem_wb_csr_addr),
     .csr_wdata(mem_wb_csr_wdata),
-        // Trap handling (MEM stage)
+    // Trap handling (MEM stage)
     .trap_taken(take_trap),
     .trap_cause(trap_cause_final),
     .trap_pc(trap_pc_final),
+    .trap_val(32'b0),              // No MMU yet, trap value always 0
+    // Interrupt inputs
+    .timer_irq(clint_timer_irq),
+    .external_irq(plic_external_irq),
+    .software_irq(1'b0),
+    // Interrupt outputs
+    .interrupt_pending(interrupt_pending),
+    .interrupt_cause(interrupt_cause),
+    // Return instructions
+    .mret_taken(ex_mem_is_mret),
+    .sret_taken(ex_mem_is_sret),
+    // Privilege and trap routing
+    .priv_level(priv_level),
+    .trap_vector(trap_vector),
+    .trap_return_pc(trap_return_pc),
+    .trap_to_s_mode(trap_to_s_mode),
+    // MMU-related outputs
+    .satp_out(satp_value),
+    .mstatus_mxr(mstatus_mxr),
+    .mstatus_sum(mstatus_sum),
+    // Performance counters
     .cycle_count(cycle),
     .retire_inst(retire_inst),
-    .mret_taken(ex_mem_is_mret),
-        // NEW: Interrupt inputs
-    .timer_irq(clint_timer_irq),   // From CLINT
-    .external_irq(plic_external_irq),           // Not implemented yet
-    .software_irq(1'b0),           // Not implemented yet
-    
-    // NEW: Interrupt outputs
-    .interrupt_pending(interrupt_pending),
-    .interrupt_cause(interrupt_cause)
+    // Timer from CLINT
+    .mtime(clint_mtime)
 );
 
 wire [31:0] forward_data_mem = ex_mem_alu_result;     // Data source from EX/MEM stage
@@ -337,6 +364,7 @@ reg ex_mem_alu_ltu;
     reg ex_mem_reg_write;
     reg ex_mem_mem_to_reg;
     reg ex_mem_is_mret;
+    reg ex_mem_is_sret;
     reg [31:0] ex_mem_pcplus4;
     reg ex_mem_isJAL;
     reg ex_mem_isJALR;
@@ -419,18 +447,21 @@ wire mem_access_in_mem_stage = ex_mem_mem_read || ex_mem_mem_write;
 
 wire exception_taken = ex_mem_is_ecall || ex_mem_is_ebreak;
 
-// Exception cause codes (RISC-V spec)
-wire [31:0] exception_cause = ex_mem_is_ebreak ? 32'd3 :   // Breakpoint
-                              ex_mem_is_ecall  ? 32'd11 :  // ECALL from M-mode
+// Exception cause codes (RISC-V spec, privilege-aware ECALL)
+wire [31:0] exception_cause = ex_mem_is_ebreak ? 32'd3 :                   // Breakpoint
+                              ex_mem_is_ecall  ? (priv_level == 2'b11 ? 32'd11 :  // ECALL from M-mode
+                                                  priv_level == 2'b01 ? 32'd9  :  // ECALL from S-mode
+                                                  32'd8) :                         // ECALL from U-mode
                               32'd0;
 
 // Exception PC: PC of the faulting instruction
 wire [31:0] exception_pc = ex_mem_pcplus4 - 4;
 
 // Interrupt detection: only take if enabled and no exception this cycle
-wire can_take_interrupt = interrupt_pending && 
-                          !exception_taken && 
-                          !ex_mem_is_mret;
+wire can_take_interrupt = interrupt_pending &&
+                          !exception_taken &&
+                          !ex_mem_is_mret &&
+                          !ex_mem_is_sret;
 
 // Interrupt PC: PC of the NEXT instruction (to resume after handler)
 wire [31:0] interrupt_pc = ex_mem_pcplus4;
@@ -507,20 +538,16 @@ assign csr_wdata_wb = mem_wb_csr_wdata;
   initial begin
       cycle = 0; // Initialize cycle counter
   end
-  wire [31:0] mtvec_value;
-  wire [31:0] mepc_value;
-  assign mtvec_value = csr_file_inst.mtvec;  // Direct access to CSR
-  assign mepc_value = csr_file_inst.mepc;
-  assign next_pc = 
-    (take_trap)              ? mtvec_value :                          // Trap (exception or interrupt)
-    (ex_mem_is_mret)         ? mepc_value :                           // Return from trap
-    (ex_mem_isJALR)          ? (ex_mem_alu_result & 32'hFFFFFFFE) :   // JALR
-    (take_branch_condition)  ? ex_mem_branch_target :                 // Taken branch
-    (ex_mem_isJAL)           ? ex_mem_branch_target :                 // JAL
-    pcplus4_if;                                                       // Normal: PC+4
+  assign next_pc =
+    (take_trap)                            ? trap_vector :                        // Trap (exception or interrupt)
+    (ex_mem_is_mret || ex_mem_is_sret)     ? trap_return_pc :                     // Return from trap
+    (ex_mem_isJALR)                        ? (ex_mem_alu_result & 32'hFFFFFFFE) : // JALR
+    (take_branch_condition)                ? ex_mem_branch_target :               // Taken branch
+    (ex_mem_isJAL)                         ? ex_mem_branch_target :               // JAL
+    pcplus4_if;                                                                   // Normal: PC+4
 
-wire pipeline_flush = take_trap || take_branch_condition || 
-                      ex_mem_isJAL || ex_mem_isJALR || ex_mem_is_mret;
+wire pipeline_flush = take_trap || take_branch_condition ||
+                      ex_mem_isJAL || ex_mem_isJALR || ex_mem_is_mret || ex_mem_is_sret;
   // Sequential Logic (Clocking PC, IF/ID, ID/EX Registers)
   always @(posedge clk or posedge rst) begin
       if (rst || pipeline_flush) begin
@@ -567,6 +594,7 @@ wire pipeline_flush = take_trap || take_branch_condition ||
           ex_mem_mem_write <= 1'b0;
           ex_mem_reg_write <= 1'b0;
           ex_mem_is_mret <= 1'b0;
+          ex_mem_is_sret <= 1'b0;
         mem_wb_alu_result <= 32'b0;
         mem_wb_rd_addr    <= 5'b0;
         mem_wb_reg_write  <= 1'b0;
@@ -594,6 +622,7 @@ wire pipeline_flush = take_trap || take_branch_condition ||
       id_ex_is_ecall    <= 1'b0;
       id_ex_is_ebreak   <= 1'b0;
       id_ex_is_mret  <= 1'b0;
+      id_ex_is_sret  <= 1'b0;
       id_ex_is_lr       <= 1'b0;
       id_ex_is_sc       <= 1'b0;
       id_ex_is_amo      <= 1'b0;
@@ -664,11 +693,13 @@ wire pipeline_flush = take_trap || take_branch_condition ||
           ex_mem_branch_target <= branch_target_ex;
           mem_wb_mem_data   <= mem_rdata_muxed;
 id_ex_is_mret <= is_mret_ctrl;
+id_ex_is_sret <= is_sret_ctrl;
 id_ex_is_lr       <= is_lr_ctrl;
 id_ex_is_sc       <= is_sc_ctrl;
 id_ex_is_amo      <= is_amo_ctrl;
 id_ex_amo_funct5  <= amo_funct5_ctrl;
 ex_mem_is_mret <= id_ex_is_mret;
+ex_mem_is_sret <= id_ex_is_sret;
 ex_mem_is_lr      <= id_ex_is_lr;
 ex_mem_is_sc      <= id_ex_is_sc;
 ex_mem_is_amo     <= id_ex_is_amo;

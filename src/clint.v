@@ -22,7 +22,10 @@ module clint (
     output reg    addr_valid,  // High if address is in CLINT region
     
     // Interrupt output
-    output        timer_irq    // Timer interrupt pending
+    output        timer_irq,   // Timer interrupt pending
+
+    // Timer value output (for CSR TIME register)
+    output [63:0] mtime_out
 );
 
     // ============================================================
@@ -63,6 +66,7 @@ module clint (
     // Note: This is a level-sensitive signal, not edge-triggered
     // Software clears it by writing a new (larger) value to mtimecmp
     assign timer_irq = (mtime >= mtimecmp);
+    assign mtime_out = mtime;
     
     // ============================================================
     // mtime Counter (always incrementing)
