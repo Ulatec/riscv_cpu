@@ -25,6 +25,7 @@ module control_unit(
     output reg        is_ebreak,
     output reg        is_mret,
     output reg        is_sret,
+    output reg        is_sfence_vma,
     // Atomic (A extension)
     output wire       is_lr,
     output wire       is_sc,
@@ -57,6 +58,7 @@ assign is_amo = is_atomic && !is_lr && !is_sc;
         is_ebreak = 1'b0;
         is_mret = 1'b0;
         is_sret = 1'b0;
+        is_sfence_vma = 1'b0;
         case (opcode)
             5'b01100: begin // R-type (Base + M extension)
                 reg_write = 1'b1;
@@ -141,6 +143,9 @@ assign is_amo = is_atomic && !is_lr && !is_sc;
                     end
                     else if (funct7 == 7'b0001000 && rs2 == 5'b00010) begin
                         is_sret = 1'b1;           // SRET: funct7=0x08, rs2=2
+                    end
+                    else if (funct7 == 7'b0001001) begin
+                        is_sfence_vma = 1'b1;     // SFENCE.VMA: funct7=0x09
                     end
                     else if (rs2[0]) begin
                         is_ebreak = 1'b1;         // EBREAK: rs2=1
