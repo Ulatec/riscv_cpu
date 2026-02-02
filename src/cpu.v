@@ -7,6 +7,7 @@
 `include "../src/plic.v"
 `include "../src/atomic_unit.v"
 `include "../src/mmu.v"
+`include "../src/decompressor.v"
 
 module cpu(
     input rst, clk,
@@ -45,6 +46,9 @@ module cpu(
         debug_ex_instruction  = 32'h00000013;
         debug_mem_instruction = 32'h00000013;
         debug_wb_instruction  = 32'h00000013;
+        saved_half   = 16'b0;
+        have_saved   = 1'b0;
+        spanning_pc  = 32'b0;
     end
 
     // =========================================================================
@@ -53,16 +57,25 @@ module cpu(
     reg [31:0] pc_reg;
 
     // =========================================================================
+    // RVC (Compressed Instruction) State
+    // =========================================================================
+    reg [15:0] saved_half;       // Saved upper half for spanning instructions
+    reg        have_saved;       // Whether saved_half is valid
+    reg [31:0] spanning_pc;      // PC where spanning instruction started
+
+    // =========================================================================
     // IF/ID Pipeline Registers
     // =========================================================================
     reg [31:0] if_id_instruction;
     reg [31:0] if_id_pcplus4;
+    reg [31:0] if_id_pc;         // PC of instruction in IF/ID
 
     // =========================================================================
     // ID/EX Pipeline Registers
     // =========================================================================
     // Data values
     reg [31:0] id_ex_pcplus4;
+    reg [31:0] id_ex_pc;         // PC of instruction in ID/EX
     reg [31:0] id_ex_rs1_data;
     reg [31:0] id_ex_rs2_data;
     reg [31:0] id_ex_immediate;
@@ -100,6 +113,7 @@ module cpu(
     // EX/MEM Pipeline Registers
     // =========================================================================
     reg [31:0] ex_mem_alu_result;
+    reg [31:0] ex_mem_pc;          // PC of instruction in EX/MEM
     reg [31:0] ex_mem_rs1_data;    // For SFENCE.VMA vaddr
     reg [31:0] ex_mem_rs2_data;
     reg [4:0]  ex_mem_rs1_addr;    // For SFENCE.VMA vaddr_valid check
@@ -168,8 +182,27 @@ module cpu(
     wire        zero_flag;
     wire [31:0] write_data_to_reg;
 
-    // IF Stage
-    wire [31:0] pcplus4_if = pc_reg + 4;
+    // =========================================================================
+    // RVC Decompressor
+    // =========================================================================
+    wire [31:0] decompressed_instruction;
+    wire        rvc_is_compressed;
+    wire        rvc_need_next_half;
+
+    decompressor decomp_inst (
+        .fetched_word(imem_rdata),
+        .pc_bit1(pc_reg[1]),
+        .saved_half(saved_half),
+        .have_saved(have_saved),
+        .instruction(decompressed_instruction),
+        .is_compressed(rvc_is_compressed),
+        .need_next_half(rvc_need_next_half)
+    );
+
+    // IF Stage - PC increment: +2 for compressed/spanning, +4 for normal 32-bit
+    wire [31:0] pcplus_if = rvc_need_next_half  ? (pc_reg + 32'd2) :
+                            (rvc_is_compressed || have_saved) ? (pc_reg + 32'd2) :
+                            (pc_reg + 32'd4);
     wire [31:0] next_pc;
 
     // =========================================================================
@@ -519,7 +552,7 @@ module cpu(
     // Exception PC: faulting instruction address
     // For ifetch page faults, the faulting PC is the current pc_reg
     // For data faults/ecall/ebreak, it's the instruction in MEM stage
-    wire [31:0] exception_pc = effective_ifetch_fault ? pc_reg : (ex_mem_pcplus4 - 4);
+    wire [31:0] exception_pc = effective_ifetch_fault ? pc_reg : ex_mem_pc;
 
     // Trap value: faulting address for page faults
     wire [31:0] trap_val = page_fault_data    ? mmu_fault_vaddr :
@@ -585,7 +618,7 @@ module cpu(
     // =========================================================================
     // ALU Input Muxes (EX Stage)
     // =========================================================================
-    wire [31:0] pc_ex = id_ex_pcplus4 - 4;
+    wire [31:0] pc_ex = id_ex_pc;
 
     wire [31:0] alu_in1_source_select =
         (id_ex_alu_in1_src == 2'b01) ? pc_ex :
@@ -712,7 +745,7 @@ module cpu(
                        (normal_mem_write || atomic_do_mem_write) ?
                        (is_atomic_mem ? 4'b1111 : store_byte_enables) : 4'b0000;
 
-    wire [31:0] instruction_from_mem = imem_rdata;
+    wire [31:0] instruction_from_mem = decompressed_instruction;
 
     // =========================================================================
     // Register File
@@ -754,7 +787,7 @@ module cpu(
         ex_mem_isJALR ? (ex_mem_alu_result & 32'hFFFFFFFE) :
         take_branch_condition ? ex_mem_branch_target :
         ex_mem_isJAL ? ex_mem_branch_target :
-        pcplus4_if;
+        pcplus_if;
 
     wire pipeline_flush = (take_trap || take_branch_condition ||
                           ex_mem_isJAL || ex_mem_isJALR ||
@@ -784,11 +817,17 @@ module cpu(
             // Full Reset
             // =================================================================
             pc_reg <= 32'h80000000;  // Start at RAM base
+            // RVC state
+            saved_half   <= 16'b0;
+            have_saved   <= 1'b0;
+            spanning_pc  <= 32'b0;
             // IF/ID Reset
             if_id_instruction <= 32'h00000013;
             if_id_pcplus4     <= 32'b0;
+            if_id_pc          <= 32'b0;
             // ID/EX Reset
             id_ex_pcplus4     <= 32'b0;
+            id_ex_pc          <= 32'b0;
             id_ex_rs1_data    <= 32'b0;
             id_ex_rs2_data    <= 32'b0;
             id_ex_immediate   <= 32'b0;
@@ -819,6 +858,7 @@ module cpu(
             id_ex_amo_funct5  <= 5'b0;
             // EX/MEM Reset
             ex_mem_alu_result <= 32'b0;
+            ex_mem_pc         <= 32'b0;
             ex_mem_rs1_data   <= 32'b0;
             ex_mem_rs2_data   <= 32'b0;
             ex_mem_rs1_addr   <= 5'b0;
@@ -880,12 +920,17 @@ module cpu(
             // =================================================================
             pc_reg <= next_pc;
 
+            // Clear RVC spanning state
+            have_saved <= 1'b0;
+
             // Flush IF/ID
             if_id_instruction <= 32'h00000013;
             if_id_pcplus4     <= 32'b0;
+            if_id_pc          <= 32'b0;
 
             // Flush ID/EX
             id_ex_pcplus4     <= 32'b0;
+            id_ex_pc          <= 32'b0;
             id_ex_rs1_data    <= 32'b0;
             id_ex_rs2_data    <= 32'b0;
             id_ex_immediate   <= 32'b0;
@@ -917,6 +962,7 @@ module cpu(
 
             // Flush EX/MEM
             ex_mem_alu_result <= 32'b0;
+            ex_mem_pc         <= 32'b0;
             ex_mem_rs1_data   <= 32'b0;
             ex_mem_rs2_data   <= 32'b0;
             ex_mem_rs1_addr   <= 5'b0;
@@ -1001,6 +1047,7 @@ module cpu(
 
             // EX/MEM continues normally
             ex_mem_alu_result <= alu_result;
+            ex_mem_pc         <= id_ex_pc;
             ex_mem_rs1_data   <= sfence_rs1_forwarded;
             ex_mem_rs2_data   <= store_rs2_forwarded;
             ex_mem_rs1_addr   <= id_ex_rs1_addr;
@@ -1065,12 +1112,23 @@ module cpu(
                 // --- Clock PC ---
                 pc_reg <= next_pc;
 
+                // --- RVC spanning state ---
+                if (rvc_need_next_half) begin
+                    saved_half  <= imem_rdata[31:16];
+                    have_saved  <= 1'b1;
+                    spanning_pc <= pc_reg;
+                end else begin
+                    have_saved  <= 1'b0;
+                end
+
                 // --- IF/ID ---
                 if_id_instruction <= instruction_from_mem;
-                if_id_pcplus4     <= pcplus4_if;
+                if_id_pcplus4     <= pcplus_if;
+                if_id_pc          <= have_saved ? spanning_pc : pc_reg;
 
                 // --- ID/EX ---
                 id_ex_pcplus4     <= if_id_pcplus4;
+                id_ex_pc          <= if_id_pc;
                 id_ex_rs1_data    <= rs1_data;
                 id_ex_rs2_data    <= rs2_data;
                 id_ex_immediate   <= immediate_id;
@@ -1102,6 +1160,7 @@ module cpu(
 
                 // --- EX/MEM ---
                 ex_mem_alu_result <= alu_result;
+                ex_mem_pc         <= id_ex_pc;
                 ex_mem_rs1_data   <= sfence_rs1_forwarded;
                 ex_mem_rs2_data   <= store_rs2_forwarded;
                 ex_mem_rs1_addr   <= id_ex_rs1_addr;
