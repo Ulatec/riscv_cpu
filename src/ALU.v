@@ -35,26 +35,6 @@ wire [63:0] mul_su;   // signed × unsigned
 assign mul_ss = $signed(alu_in1) * $signed(alu_in2);
 assign mul_uu = alu_in1 * alu_in2;  // Both treated as unsigned
 assign mul_su = $signed(alu_in1) * $signed({1'b0, alu_in2}); // rs1 signed, rs2 signed
-wire div_by_zero = (alu_in2 == 32'b0);
-wire signed_overflow = (alu_in1 == 32'h80000000) && (alu_in2 == 32'hFFFFFFFF);
-wire signed [31:0] signed_in1 = alu_in1;
-wire signed [31:0] signed_in2 = alu_in2;
-wire signed [31:0] signed_div_raw = signed_in1 / signed_in2;
-wire signed [31:0] signed_rem_raw = signed_in1 % signed_in2;
-wire [31:0] div_result;
-wire [31:0] divu_result;
-wire [31:0] rem_result;
-wire [31:0] remu_result;
-assign div_result = div_by_zero    ? 32'hFFFFFFFF :
-                        signed_overflow ? 32'h80000000 :
-                        signed_div_raw;               
-assign divu_result = div_by_zero ? 32'hFFFFFFFF :
-                         alu_in1 / alu_in2;               
-assign rem_result = div_by_zero    ? alu_in1 :
-                        signed_overflow ? 32'b0 :
-                        signed_rem_raw;
-assign remu_result = div_by_zero ? alu_in1 :
-                         alu_in1 % alu_in2;
 always @(*) begin
     case (ALUOp)
         ALU_ADD:  alu_out = alu_in1 + alu_in2;
@@ -71,10 +51,10 @@ always @(*) begin
         ALU_MULH: alu_out = mul_ss[63:32];   // Upper 32 bits (signed × signed)
         ALU_MULHSU: alu_out = mul_su[63:32];   // Upper 32 bits (signed × unsigned)
         ALU_MULHU:  alu_out = mul_uu[63:32];   // Upper 32 bits (unsigned × unsigned)
-        ALU_DIV:    alu_out = div_result;
-        ALU_DIVU:   alu_out = divu_result;
-        ALU_REM:    alu_out = rem_result;
-        ALU_REMU:   alu_out = remu_result;
+        ALU_DIV:    alu_out = 32'b0;  // Handled by div_unit
+        ALU_DIVU:   alu_out = 32'b0;  // Handled by div_unit
+        ALU_REM:    alu_out = 32'b0;  // Handled by div_unit
+        ALU_REMU:   alu_out = 32'b0;  // Handled by div_unit
         default: alu_out = 32'bxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx;
     endcase
 end

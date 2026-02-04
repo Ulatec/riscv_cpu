@@ -8,6 +8,7 @@
 `include "../src/atomic_unit.v"
 `include "../src/mmu.v"
 `include "../src/decompressor.v"
+`include "../src/div_unit.v"
 
 module cpu(
     input rst, clk,
@@ -512,7 +513,7 @@ module cpu(
     wire mmu_stall_ifetch = !ifetch_ready && !ifetch_fault;
     wire mmu_stall_data = (ex_mem_mem_read || ex_mem_mem_write) &&
                           !data_ready && !data_fault;
-    wire mmu_stall = mmu_stall_ifetch || mmu_stall_data;
+    wire mmu_stall = mmu_stall_ifetch || mmu_stall_data || div_stall;
     wire pipeline_stall = mmu_stall || data_hazard_stall;
 
     // =========================================================================
@@ -779,6 +780,36 @@ module cpu(
     );
 
     // =========================================================================
+    // Iterative Divider (replaces combinational DIV/REM in ALU)
+    // =========================================================================
+    wire is_div_op = (id_ex_alu_op == `ALU_DIV)  || (id_ex_alu_op == `ALU_DIVU) ||
+                     (id_ex_alu_op == `ALU_REM)  || (id_ex_alu_op == `ALU_REMU);
+    wire div_is_unsigned = (id_ex_alu_op == `ALU_DIVU) || (id_ex_alu_op == `ALU_REMU);
+    wire div_is_rem = (id_ex_alu_op == `ALU_REM) || (id_ex_alu_op == `ALU_REMU);
+
+    wire [31:0] div_result;
+    wire        div_busy;
+    wire        div_done;
+    wire        div_start = is_div_op && !div_busy && !div_done;
+    wire        div_stall = div_busy || (is_div_op && !div_done);
+
+    div_unit div_unit_inst (
+        .clk(clk),
+        .rst(rst),
+        .start(div_start),
+        .is_unsigned(div_is_unsigned),
+        .is_rem(div_is_rem),
+        .dividend(forwarded_alu_in1),
+        .divisor(forwarded_alu_in2),
+        .result(div_result),
+        .busy(div_busy),
+        .done(div_done)
+    );
+
+    // Mux div result into ALU result for div operations
+    wire [31:0] effective_alu_result = is_div_op ? div_result : alu_result;
+
+    // =========================================================================
     // Next PC Logic
     // =========================================================================
     assign next_pc =
@@ -1019,6 +1050,12 @@ module cpu(
             debug_mem_instruction <= 32'h00000013;
             debug_wb_instruction  <= debug_mem_instruction;
 
+        end else if (mmu_stall) begin
+            // =================================================================
+            // MMU / Divider Stall - entire pipeline frozen
+            // All registers retain their values (no assignments needed)
+            // =================================================================
+
         end else if (data_hazard_stall) begin
             // =================================================================
             // Data Hazard Stall (load-use or CSR-use hazard)
@@ -1046,7 +1083,7 @@ module cpu(
             id_ex_rd_addr     <= 5'b0;
 
             // EX/MEM continues normally
-            ex_mem_alu_result <= alu_result;
+            ex_mem_alu_result <= effective_alu_result;
             ex_mem_pc         <= id_ex_pc;
             ex_mem_rs1_data   <= sfence_rs1_forwarded;
             ex_mem_rs2_data   <= store_rs2_forwarded;
@@ -1108,7 +1145,7 @@ module cpu(
             // =================================================================
             // Normal Operation (no stall, no flush)
             // =================================================================
-            if (!mmu_stall) begin
+
                 // --- Clock PC ---
                 pc_reg <= next_pc;
 
@@ -1159,7 +1196,7 @@ module cpu(
                 id_ex_amo_funct5  <= amo_funct5_ctrl;
 
                 // --- EX/MEM ---
-                ex_mem_alu_result <= alu_result;
+                ex_mem_alu_result <= effective_alu_result;
                 ex_mem_pc         <= id_ex_pc;
                 ex_mem_rs1_data   <= sfence_rs1_forwarded;
                 ex_mem_rs2_data   <= store_rs2_forwarded;
@@ -1216,7 +1253,6 @@ module cpu(
                 debug_ex_instruction  <= if_id_instruction;
                 debug_mem_instruction <= debug_ex_instruction;
                 debug_wb_instruction  <= debug_mem_instruction;
-            end
         end
     end
 
