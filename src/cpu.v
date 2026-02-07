@@ -477,9 +477,9 @@ module cpu(
         // CSR interface
         .satp(satp_value),
         .priv_mode(current_priv),
-        .data_priv_mode(current_priv),  // MPRV not yet implemented
-        .mstatus_mxr(mstatus_mxr),
-        .mstatus_sum(mstatus_sum),
+        .data_priv_mode(effective_data_priv),
+        .mstatus_mxr(fwd_mstatus_mxr),
+        .mstatus_sum(fwd_mstatus_sum),
 
         // SFENCE.VMA
         .sfence_vma(sfence_in_mem),
@@ -530,6 +530,23 @@ module cpu(
     wire [1:0]  current_priv;
     wire        mstatus_mxr;
     wire        mstatus_sum;
+    wire        mstatus_mprv;
+    wire [1:0]  mstatus_mpp;
+
+    // CSR-to-MMU forwarding: when WB stage writes mstatus/sstatus, forward
+    // new SUM/MXR/MPRV/MPP to MMU so MEM stage sees updated values immediately
+    wire csr_fwd_active = mem_wb_csr_write &&
+        (mem_wb_csr_addr == 12'h300 || mem_wb_csr_addr == 12'h100);
+    wire csr_fwd_mstatus = mem_wb_csr_write && (mem_wb_csr_addr == 12'h300);
+    wire fwd_mstatus_sum = csr_fwd_active ? mem_wb_csr_wdata[18] : mstatus_sum;
+    wire fwd_mstatus_mxr = csr_fwd_active ? mem_wb_csr_wdata[19] : mstatus_mxr;
+    // MPRV/MPP only writable via mstatus (not sstatus)
+    wire fwd_mstatus_mprv = csr_fwd_mstatus ? mem_wb_csr_wdata[17] : mstatus_mprv;
+    wire [1:0] fwd_mstatus_mpp = csr_fwd_mstatus ? mem_wb_csr_wdata[12:11] : mstatus_mpp;
+
+    // MPRV: M-mode data accesses use MPP privilege when MPRV=1
+    wire [1:0] effective_data_priv = (current_priv == 2'b11 && fwd_mstatus_mprv) ?
+                                      fwd_mstatus_mpp : current_priv;
 
     // Suppress wrong-path ifetch page faults when MEM stage has a redirect
     wire ifetch_fault_suppress = take_branch_condition || ex_mem_isJAL || ex_mem_isJALR ||
@@ -603,6 +620,8 @@ module cpu(
         .satp_out(satp_value),
         .mstatus_mxr(mstatus_mxr),
         .mstatus_sum(mstatus_sum),
+        .mstatus_mprv_out(mstatus_mprv),
+        .mstatus_mpp_out(mstatus_mpp),
         // Performance counters
         .cycle_count(cycle),
         .retire_inst(retire_inst),

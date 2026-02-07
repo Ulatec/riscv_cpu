@@ -56,6 +56,8 @@ module csr_file (
     output [31:0] satp_out,        // SATP register for MMU
     output        mstatus_mxr,     // Make eXecutable Readable
     output        mstatus_sum,     // Supervisor User Memory access
+    output        mstatus_mprv_out,// Modify PRiVilege
+    output [1:0]  mstatus_mpp_out, // Previous privilege for M-mode
 
     // Performance counters
     input  [31:0] cycle_count,
@@ -312,6 +314,8 @@ module csr_file (
     assign satp_out = satp;
     assign mstatus_mxr = mstatus[19];  // MXR bit
     assign mstatus_sum = mstatus[18];  // SUM bit
+    assign mstatus_mprv_out = mstatus[17];  // MPRV bit
+    assign mstatus_mpp_out = mstatus[12:11];  // MPP bits
 
     // =========================================================================
     // Performance Counters
@@ -478,6 +482,10 @@ module csr_file (
 
                 // Set MPP to U-mode (or S if no U-mode)
                 mstatus_mpp <= PRIV_U;
+
+                // Clear MPRV when returning to privilege < M (spec requirement)
+                if (mstatus_mpp != PRIV_M)
+                    mstatus_mprv <= 1'b0;
             end
 
             // =================================================================
@@ -493,6 +501,9 @@ module csr_file (
 
                 // Set SPP to U-mode
                 mstatus_spp <= 1'b0;
+
+                // SPP is never M, so always clear MPRV on SRET
+                mstatus_mprv <= 1'b0;
             end
 
             // =================================================================
