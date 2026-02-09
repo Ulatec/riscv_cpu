@@ -1,3 +1,4 @@
+`ifndef SYNTHESIS
 `include "../src/reg_file.v"
 `include "../src/ALU.v"
 `include "../src/csr_file.v"
@@ -9,6 +10,7 @@
 `include "../src/mmu.v"
 `include "../src/decompressor.v"
 `include "../src/div_unit.v"
+`endif
 
 module cpu(
     input rst, clk,
@@ -41,6 +43,7 @@ module cpu(
     reg [31:0] debug_mem_instruction;
     reg [31:0] debug_wb_instruction;
 
+    `ifdef SIMULATION
     initial begin
         cycle = 0;
         debug_id_instruction  = 32'h00000013;
@@ -51,6 +54,7 @@ module cpu(
         have_saved   = 1'b0;
         spanning_pc  = 32'b0;
     end
+    `endif
 
     // =========================================================================
     // Program Counter
@@ -1323,6 +1327,7 @@ module cpu(
     // =========================================================================
     // Debug Monitoring (disabled - set cycle range to enable)
     // =========================================================================
+    `ifdef SIMULATION
     always @(posedge clk) begin
         if (!rst && cycle >= 1 && cycle <= 0) begin  // Disabled (cycle <= 0)
             $display("\n========== Cycle %0d ==========", cycle);
@@ -1340,5 +1345,6 @@ module cpu(
                      mem_wb_rd_addr, mem_wb_reg_write, write_data_to_reg);
         end
     end
+    `endif
 
 endmodule

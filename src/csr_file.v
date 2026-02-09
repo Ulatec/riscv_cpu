@@ -571,6 +571,7 @@ module csr_file (
     // Initialization (simulation only)
     // =========================================================================
 
+    `ifdef SIMULATION
     initial begin
         mstatus_mie  = 1'b0;
         mstatus_mpie = 1'b0;
@@ -606,5 +607,6 @@ module csr_file (
 
         priv_level = PRIV_M;
     end
+    `endif
 
 endmodule

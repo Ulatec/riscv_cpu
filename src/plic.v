@@ -229,6 +229,7 @@ module plic (
     // Initialization (for simulation)
     // ============================================================
     
+    `ifdef SIMULATION
     initial begin
         for (j = 1; j < NUM_SOURCES; j = j + 1) begin
             priority_reg[j] = 3'd0;
@@ -240,5 +241,6 @@ module plic (
         claim_active = 1'b0;
         irq_sources_prev = 32'b0;
     end
+    `endif
 
 endmodule
