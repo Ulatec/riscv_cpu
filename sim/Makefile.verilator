@@ -1,0 +1,34 @@
+# Verilator build for RISC-V SoC Linux boot simulation
+# Usage: make -f Makefile.verilator [build|run|clean]
+
+VERILOG_TOP = ../src/soc.v
+CPP_TB      = sim_main.cpp
+TOP_MODULE  = soc
+OBJ_DIR     = obj_dir
+SIM_BIN     = $(OBJ_DIR)/Vsoc
+
+# Verilator flags
+VFLAGS  = --cc --exe --build
+VFLAGS += --top-module $(TOP_MODULE)
+VFLAGS += -O3
+VFLAGS += --x-assign fast --x-initial fast
+VFLAGS += -Wno-fatal
+VFLAGS += --public-flat-rw
+VFLAGS += -I../src
+VFLAGS += -GRAM_SIZE=32\'h2400000
+
+# Compiler optimization
+VFLAGS += -CFLAGS "-O2"
+
+.PHONY: build run clean
+
+build: $(SIM_BIN)
+
+$(SIM_BIN): $(VERILOG_TOP) $(CPP_TB)
+	verilator $(VFLAGS) $(VERILOG_TOP) $(CPP_TB)
+
+run: $(SIM_BIN)
+	./$(SIM_BIN)
+
+clean:
+	rm -rf $(OBJ_DIR)
