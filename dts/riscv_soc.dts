@@ -1,0 +1,80 @@
+/dts-v1/;
+
+/ {
+    #address-cells = <1>;
+    #size-cells = <1>;
+    compatible = "custom,riscv-soc";
+    model = "Custom RV32IMA SoC";
+
+    chosen {
+        /* Direct UART earlycon - outputs immediately at boot */
+        bootargs = "earlycon=ns16550,mmio32,0x10000000,115200n8 console=ttyS0,115200n8 console=hvc0 loglevel=8 earlyprintk lpj=1000";
+        stdout-path = "serial0:115200n8";
+    };
+
+    aliases {
+        serial0 = &uart0;
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        timebase-frequency = <10000000>;  /* 10 MHz - adjust to actual clock */
+
+        cpu0: cpu@0 {
+            device_type = "cpu";
+            reg = <0>;
+            compatible = "riscv";
+            riscv,isa = "rv32imac";
+            mmu-type = "riscv,sv32";
+            status = "okay";
+
+            cpu0_intc: interrupt-controller {
+                #interrupt-cells = <1>;
+                compatible = "riscv,cpu-intc";
+                interrupt-controller;
+            };
+        };
+    };
+
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x80000000 0x02400000>;  /* 36MB at 0x80000000 */
+    };
+
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        compatible = "simple-bus";
+        ranges;
+
+        clint@2000000 {
+            compatible = "riscv,clint0";
+            reg = <0x02000000 0x10000>;
+            interrupts-extended = <&cpu0_intc 3>,  /* M-mode software interrupt */
+                                  <&cpu0_intc 7>;  /* M-mode timer interrupt */
+        };
+
+        plic: plic@c000000 {
+            compatible = "riscv,plic0";
+            reg = <0x0c000000 0x4000000>;
+            #interrupt-cells = <1>;
+            #address-cells = <0>;
+            interrupt-controller;
+            interrupts-extended = <&cpu0_intc 11>, /* M-mode external interrupt */
+                                  <&cpu0_intc 9>;  /* S-mode external interrupt */
+            riscv,ndev = <31>;  /* Number of external interrupt sources */
+        };
+
+        uart0: serial@10000000 {
+            compatible = "ns16550a";
+            reg = <0x10000000 0x100>;
+            reg-shift = <2>;            /* Registers are 32-bit aligned */
+            reg-io-width = <4>;         /* 32-bit register access */
+            clock-frequency = <10000000>; /* 10 MHz - adjust to actual */
+            interrupt-parent = <&plic>;
+            interrupts = <1>;           /* IRQ 1 on PLIC */
+            status = "okay";
+        };
+    };
+};

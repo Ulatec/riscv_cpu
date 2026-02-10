@@ -15,3 +15,20 @@
 # OS/editor
 .DS_Store
 Thumbs.db
+
+# Large binary payloads (build from source with Docker)
+dts/*.bin
+dts/*.hex
+dts/*.elf
+dts/*.o
+dts/*.zip
+# Keep compiled DTB hex (small, needed by testbenches)
+!dts/riscv_soc_dtb_le.hex
+
+# Simulation build artifacts
+sim/obj_dir/
+sim/*.vcd
+sim/*.out
+
+# Python
+__pycache__/
