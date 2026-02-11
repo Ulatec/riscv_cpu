@@ -2,7 +2,7 @@
 // FPGA SoC Wrapper for Digilent Arty S7-25
 // =============================================================================
 // Top-level module for FPGA synthesis. Contains:
-//   - MMCM: 100MHz input -> 50MHz system clock
+//   - MMCM: 100MHz input -> 20MHz system clock
 //   - Reset synchronizer with MMCM lock
 //   - SoC instantiation with 8KB RAM
 //   - LED status indicators

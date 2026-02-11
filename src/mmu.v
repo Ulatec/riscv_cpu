@@ -15,8 +15,10 @@
 // - Memory side: physical addresses
 // =============================================================================
 
+`ifndef SYNTHESIS
 `include "../src/tlb.v"
 `include "../src/page_table_walker.v"
+`endif
 
 module mmu (
     input         clk,

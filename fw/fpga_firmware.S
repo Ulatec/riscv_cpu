@@ -155,7 +155,7 @@ print_string:
 .section .rodata
 
 banner_str:
-    .asciz  "\r\n\r\nRISC-V RV32IMAC SoC on Arty S7-25\r\nClock: 50MHz | RAM: 8KB | UART: 115200 8N1\r\n> "
+    .asciz  "\r\n\r\nRISC-V RV32IMAC SoC on Arty S7-25\r\nClock: 20MHz | RAM: 4KB | UART: 115200 8N1\r\n> "
 
 prompt_str:
     .asciz  "\r\n> "

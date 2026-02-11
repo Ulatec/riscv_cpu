@@ -21,7 +21,7 @@ file mkdir $out_dir
 # =============================================================================
 # Read source files (no reliance on `include)
 # =============================================================================
-read_verilog -sv [list \
+read_verilog -sv -define SYNTHESIS=1 [list \
     $src_dir/definitions.v \
     $src_dir/reg_file.v \
     $src_dir/ALU.v \

@@ -133,14 +133,14 @@ module soc #(
     // For 8KB: RAM_AW = 11 (2048 words), for 8MB: RAM_AW = 21
     localparam RAM_AW = $clog2(RAM_SIZE/4);
 
-    // Convert byte address to word address for RAM, masked to RAM size
-    wire [RAM_AW-1:0] imem_word_addr = (imem_addr - 32'h80000000) >> 2;
-    wire [RAM_AW-1:0] dmem_word_addr = (mem_addr - 32'h80000000) >> 2;
+    // Convert byte address to word address for RAM
+    // Bit 31 is always set for RAM addresses (0x80000000+), so just use lower bits
+    wire [RAM_AW-1:0] imem_word_addr = imem_addr[RAM_AW+1:2];
+    wire [RAM_AW-1:0] dmem_word_addr = mem_addr[RAM_AW+1:2];
     
     // RAM array
-    // ram_style=block hints Vivado to use BRAM (only works with registered reads)
-    // For combinational reads, Vivado will use distributed RAM (LUT RAM)
-    (* ram_style = "block" *) reg [31:0] ram [0:(RAM_SIZE/4)-1];
+    // Distributed RAM (LUT RAM) — combinational reads are incompatible with BRAM
+    (* ram_style = "distributed" *) reg [31:0] ram [0:(RAM_SIZE/4)-1];
     
     // Initialize RAM
     integer i;

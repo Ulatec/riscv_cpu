@@ -349,8 +349,7 @@ When MPRV=1 in mstatus, M-mode data accesses use the privilege level in MPP inst
 
 ## Resources
 
-- [RISC-V ISA Manual Vol 1](https://riscv.org/technical/specifications/) - Unprivileged Specification
-- [RISC-V ISA Manual Vol 2](https://riscv.org/technical/specifications/) - Privileged Specification
+- [RISC-V ISA Specifications](https://github.com/riscv/riscv-isa-manual/releases/latest) - Unprivileged (Vol 1) and Privileged (Vol 2)
 - [Computer Organization and Design: RISC-V Edition](https://www.elsevier.com/books/computer-organization-and-design-risc-v-edition/patterson/978-0-12-812275-4) - Patterson & Hennessy
 
 ---

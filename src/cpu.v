@@ -123,7 +123,7 @@ module cpu(
     reg [31:0] ex_mem_rs2_data;
     reg [4:0]  ex_mem_rs1_addr;    // For SFENCE.VMA vaddr_valid check
     reg [4:0]  ex_mem_rs2_addr;    // For SFENCE.VMA asid_valid check
-    reg [31:0] ex_mem_rd_addr;
+    reg [4:0]  ex_mem_rd_addr;
     reg [2:0]  ex_mem_funct3;
     reg        ex_mem_zero_flag;
     reg        ex_mem_alu_lt;
@@ -917,7 +917,7 @@ module cpu(
             ex_mem_rs2_data   <= 32'b0;
             ex_mem_rs1_addr   <= 5'b0;
             ex_mem_rs2_addr   <= 5'b0;
-            ex_mem_rd_addr    <= 32'b0;
+            ex_mem_rd_addr    <= 5'b0;
             ex_mem_zero_flag  <= 1'b0;
             ex_mem_alu_lt     <= 1'b0;
             ex_mem_alu_ltu    <= 1'b0;
