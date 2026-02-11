@@ -1,7 +1,9 @@
 # RISC-V RV32IMAC SoC
-## A Verilog CPU that Boots Linux
+## A From-Scratch Verilog CPU that Boots Linux
 
-A from-scratch RISC-V RV32IMAC system-on-chip in Verilog. 5-stage pipeline, Sv32 MMU, M/S/U privilege modes. Boots OpenSBI, Linux 6.1.25, and runs a BusyBox shell.
+A solo-built RISC-V RV32IMAC system-on-chip written entirely in Verilog. 5-stage pipeline, Sv32 MMU with hardware page table walker, M/S/U privilege modes, and CLINT/PLIC/UART peripherals. Boots unmodified OpenSBI, Linux 6.1.25, and runs an interactive BusyBox shell.
+
+~5,300 lines of Verilog | ~90 instructions | 31 CSRs | 17 source files
 
 ![ISA](https://img.shields.io/badge/ISA-RV32IMAC-blue)
 ![Linux](https://img.shields.io/badge/Boots-Linux%206.1.25-green)
@@ -9,21 +11,57 @@ A from-scratch RISC-V RV32IMAC system-on-chip in Verilog. 5-stage pipeline, Sv32
 
 ---
 
-## What It Does
+## Demo: Linux Boot to Shell
 
-This CPU boots a full Linux kernel from reset:
+The CPU boots OpenSBI firmware, then the Linux kernel, and reaches an interactive BusyBox shell where commands can be executed. Full boot takes ~144M cycles (~5 minutes in Verilator).
+
+![Linux running on the CPU: /proc/cpuinfo shows rv32imac ISA and sv32 MMU](image.png)
+
+*`cat /proc/cpuinfo` and `cat /proc/meminfo` running inside Linux on the CPU -- the kernel reports the ISA (`rv32imac`), MMU type (`sv32`), and 16MB of managed memory with active page tables, slab allocator, and virtual memory.*
+
+<details>
+<summary>Full boot log (click to expand)</summary>
 
 ```
-OpenSBI v1.8.1 (M-mode, 0x80000000)
-  -> Platform init, UART/CLINT/PLIC setup
-  -> Jump to Linux kernel (S-mode, 0x80400000)
-    -> Sv32 MMU enabled, virtual memory active
-    -> Device init, earlycon on ns16550 UART
-    -> Initramfs extraction
-    -> /init -> BusyBox shell
+OpenSBI v1.8.1
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : Custom RV32IMA SoC
+Platform HART Count         : 1
+Boot HART ISA               : rv32ima
+Boot HART MIDELEG           : 0x00000222
+Boot HART MEDELEG           : 0x0000b109
+
+[    0.000000] Linux version 6.1.25
+[    0.000000] Machine model: Custom RV32IMA SoC
+[    0.000000] earlycon: ns16550 at MMIO32 0x10000000 (options '115200n8')
+[    0.000000] printk: bootconsole [ns16550] enabled
+[    0.000000] SBI specification v3.0 detected
+[    0.000000] riscv: base ISA extensions acim
+[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 8128
+[    0.000000] riscv-intc: 32 local interrupts mapped
+[    0.000000] plic: plic@c000000: mapped 31 interrupts with 1 handlers for 2 contexts.
+[    0.000046] sched_clock: 64 bits at 10MHz, resolution 100ns
+[   10.788198] 10000000.serial: ttyS0 at MMIO 0x10000000 (irq = 1) is a 16550A
+[   10.990328] printk: console [ttyS0] enabled
+[   12.779821] Freeing unused kernel image (initmem) memory: 4884K
+[   12.789422] Run /init as init process
+
+==================================
+  RV32IMA Linux - Shell Ready!
+==================================
+
+~ #
 ```
 
-The simulation runs on Verilator and reaches a working shell prompt where you can execute commands.
+</details>
 
 ---
 
@@ -33,10 +71,11 @@ The simulation runs on Verilator and reaches a working shell prompt where you ca
 
 | Extension | Instructions | Description |
 |-----------|-------------|-------------|
-| **RV32I** | 40 | Base integer (ALU, load/store, branch, jump) |
+| **RV32I** | 40 | Base integer (ALU, load/store, branch, jump, CSR) |
 | **M** | 8 | Multiply/divide (32-cycle iterative divider) |
 | **A** | 11 | Atomics (LR/SC, AMO swap/add/and/or/xor/min/max) |
-| **C** | 30+ | Compressed 16-bit instructions (RVC decompressor in IF stage) |
+| **C** | ~25 | Compressed 16-bit instructions (RVC decompressor in IF stage) |
+| **System** | 6 | ECALL, EBREAK, MRET, SRET, WFI, SFENCE.VMA |
 
 ### Privilege Modes
 
@@ -59,11 +98,19 @@ The simulation runs on Verilator and reaches a working shell prompt where you ca
 ### Pipeline
 
 - 5-stage: IF / ID / EX / MEM / WB
-- Data forwarding (EX-to-EX, MEM-to-EX, store data)
+- Data forwarding (EX-to-EX, MEM-to-EX, store data forwarding)
 - Load-use and CSR-use hazard detection with pipeline stalls
 - RVC decompression in IF stage with spanning instruction support
 - Branch resolution in MEM stage with full pipeline flush
 - Trap/interrupt detection in MEM stage
+
+### CSRs (31 registers)
+
+Machine-mode (15): mstatus, misa, medeleg, mideleg, mie, mtvec, mcounteren, mscratch, mepc, mcause, mtval, mip, mvendorid, marchid, mhartid
+
+Supervisor-mode (10): sstatus, sie, stvec, scounteren, sscratch, sepc, scause, stval, sip, satp
+
+Counters (6): cycle/cycleh, time/timeh, instret/instreth
 
 ### Peripherals
 
@@ -111,34 +158,34 @@ The simulation runs on Verilator and reaches a working shell prompt where you ca
 
 ### CPU Core
 
-| File | Description |
-|------|-------------|
-| `src/cpu.v` | Main 5-stage pipeline with forwarding, MMU integration, CSR forwarding |
-| `src/control_unit.v` | Instruction decoder: RV32IMAC + system instructions |
-| `src/ALU.v` | 18 ALU operations (base + M extension) |
-| `src/div_unit.v` | 32-cycle iterative restoring divider |
-| `src/csr_file.v` | CSR registers, M/S-mode trap handling, interrupt delegation |
-| `src/decompressor.v` | RVC 16-bit to 32-bit instruction expansion |
-| `src/reg_file.v` | 32-entry register file (x0 hardwired to 0) |
-| `src/definitions.v` | ALU opcode definitions |
+| File | Lines | Description |
+|------|-------|-------------|
+| `src/cpu.v` | 1350 | Main 5-stage pipeline with forwarding, MMU integration, CSR forwarding |
+| `src/control_unit.v` | 185 | Instruction decoder: RV32IMAC + system instructions |
+| `src/ALU.v` | 63 | 18 ALU operations (base + M extension) |
+| `src/div_unit.v` | 129 | 32-cycle iterative restoring divider |
+| `src/csr_file.v` | 612 | 31 CSR registers, M/S-mode trap handling, interrupt delegation |
+| `src/decompressor.v` | 370 | RVC 16-bit to 32-bit instruction expansion |
+| `src/reg_file.v` | 31 | 32-entry register file (x0 hardwired to 0) |
+| `src/definitions.v` | 17 | ALU opcode definitions |
 
 ### MMU
 
-| File | Description |
-|------|-------------|
-| `src/mmu.v` | Sv32 MMU coordinator: TLB lookup, PTW arbitration, fault handling |
-| `src/tlb.v` | 16-entry fully-associative TLB with ASID and superpage support |
-| `src/page_table_walker.v` | Hardware 2-level Sv32 page table walker with A/D bit management |
+| File | Lines | Description |
+|------|-------|-------------|
+| `src/mmu.v` | 410 | Sv32 MMU coordinator: TLB lookup, PTW arbitration, fault handling |
+| `src/tlb.v` | 348 | 16-entry fully-associative TLB with ASID and superpage support |
+| `src/page_table_walker.v` | 377 | Hardware 2-level Sv32 page table walker with A/D bit management |
 
 ### SoC
 
-| File | Description |
-|------|-------------|
-| `src/soc.v` | Top-level SoC: RAM, MMIO routing, dual-port memory |
-| `src/uart.v` | 16550 UART with FIFOs and hardware TX/RX for FPGA |
-| `src/clint.v` | CLINT timer unit |
-| `src/plic.v` | PLIC interrupt controller |
-| `src/atomic_unit.v` | LR/SC reservation tracking + AMO operations |
+| File | Lines | Description |
+|------|-------|-------------|
+| `src/soc.v` | 219 | Top-level SoC: RAM, MMIO routing, dual-port memory |
+| `src/uart.v` | 485 | 16550 UART with FIFOs and hardware TX/RX for FPGA |
+| `src/clint.v` | 142 | CLINT timer unit |
+| `src/plic.v` | 245 | PLIC interrupt controller |
+| `src/atomic_unit.v` | 173 | LR/SC reservation tracking + AMO operations |
 
 ---
 
@@ -176,14 +223,64 @@ docker build -t riscv-toolchain .
 docker run -it --rm \
   -v "$(pwd):/output" \
   -v riscv-build:/work \
-  riscv-toolchain bash /output/scripts/build_initramfs.sh
+  riscv-toolchain bash /output/scripts/build_all.sh
 ```
 
 This produces `dts/fw_payload_earlycon.hex` containing OpenSBI + Linux kernel + BusyBox initramfs.
 
 ---
 
+## Technical Challenges
+
+Building a CPU that passes unit tests is straightforward. Getting one to boot a real operating system exposed a series of subtle correctness issues that don't appear in textbook pipeline designs. These were the hardest problems in the project.
+
+### CSR-to-MMU Forwarding
+
+**Problem**: After the kernel writes `csrs sstatus, SUM` to allow supervisor-mode access to user pages, the very next instruction would page fault. The CSR write was in the WB stage, but the MMU permission check happened in MEM -- one cycle before the write took effect.
+
+**Solution**: Detect mstatus/sstatus writes in WB and forward the new SUM and MXR bits directly to the MMU, bypassing the CSR register file. This is analogous to ALU data forwarding but for control bits -- a case not covered in standard pipeline literature.
+
+### Page Table Walker Arbitration Deadlock
+
+**Problem**: During Linux boot, the kernel would freeze during page table setup. The MMU serves two clients: instruction fetch and data access. When a data access caused a page fault, the fault was latched in the MMU -- but this also blocked the instruction fetch PTW from ever starting, since the data fault flag prevented new walks.
+
+**Solution**: Separate the fault-latching logic so that a data-side fault doesn't block the instruction-side PTW. Give data access priority (since it's typically from MEM stage and time-critical), but allow ifetch walks to proceed independently when the data path is idle.
+
+### Wrong-Path Instruction Fetch Page Faults
+
+**Problem**: When a branch in the MEM stage redirects the PC, instructions already in IF and ID are on the wrong path and will be flushed. But if one of those wrong-path fetches triggers a page fault, the CPU would take a spurious trap before the flush could take effect.
+
+**Solution**: Suppress ifetch page faults when the MEM stage is about to redirect (branch taken, MRET, SRET, SFENCE.VMA). The flush signal takes priority over the fault.
+
+### Compressed Instruction Spanning
+
+**Problem**: RVC compressed instructions are 16 bits, but the memory bus is 32 bits wide. When PC[1]=1, a 32-bit instruction can start in the upper half of one word and end in the lower half of the next. The pipeline needs two fetches to reconstruct a single instruction, but only if it's actually a 32-bit instruction -- which you can't know until you see the first 16 bits.
+
+**Solution**: A `saved_half` register captures the upper 16 bits when a potential span is detected. The next fetch concatenates the two halves. A `spanning_pc` register preserves the true instruction address since the PC has already advanced. This adds a 1-cycle bubble only for spanning instructions.
+
+### Trap Handling During MMU Stalls
+
+**Problem**: When the MMU stalls the pipeline (during a page table walk), the CSR trap logic was still processing interrupts. This corrupted the SPP (supervisor previous privilege) bit because the trap handler would fire while the pipeline was frozen, overwriting state that the stalled instruction still needed.
+
+**Solution**: Gate all trap processing with `!mmu_stall`. The trap signal becomes `take_trap_effective = take_trap && !mmu_stall`, ensuring CSR state is only modified when the pipeline is actually flowing.
+
+---
+
 ## Linux Boot Details
+
+### Boot Sequence
+
+```
+OpenSBI v1.8.1 (M-mode, 0x80000000)
+  -> Relocation table applied (608 entries)
+  -> Platform init: UART/CLINT/PLIC setup
+  -> Jump to Linux (S-mode, 0x80400000)
+    -> head.S: build page tables, enable Sv32 MMU
+    -> First instruction page fault -> kernel virtual space (0xC0xxxxxx)
+    -> DTB parse, memory init, driver init
+    -> earlycon: ns16550 at MMIO32 0x10000000
+    -> Initramfs extraction, /init -> BusyBox shell
+```
 
 ### Boot Arguments
 
@@ -213,8 +310,9 @@ The design includes synthesis support for the **Digilent Arty S7-25** (Spartan-7
 
 - `ifdef SIMULATION` / `ifndef SYNTHESIS` guards on all simulation constructs
 - Hardware UART TX/RX serializer (baud rate generator + shift registers)
-- MMCM clock generation (100MHz -> 50MHz)
+- MMCM clock generation (100MHz -> 20MHz)
 - 32-cycle iterative divider (replaces combinational div for timing closure)
+- Bare-metal UART echo firmware for hardware bring-up
 
 See `src/fpga_soc_wrapper.v`, `constr/board_arty_s7.xdc`, and `fpga/build.tcl`.
 
@@ -222,25 +320,30 @@ See `src/fpga_soc_wrapper.v`, `constr/board_arty_s7.xdc`, and `fpga/build.tcl`.
 
 ## Design Highlights
 
-### Compressed Instruction Handling
-
-The RVC decompressor sits in the IF stage. When PC[1]=1, a 32-bit instruction can span two memory words. The pipeline tracks this with `saved_half` / `have_saved` registers and a `spanning_pc` to record the true instruction address.
-
-### Iterative Divider
-
-Division uses a 32-cycle restoring algorithm in `div_unit.v`. The divider stalls the pipeline via `div_stall` merged into the MMU stall signal. Special cases (divide-by-zero, signed overflow MIN_INT/-1) resolve in a single cycle.
-
-### CSR-to-MMU Forwarding
-
-When a CSR write to mstatus/sstatus is in the WB stage, the new SUM and MXR bits are forwarded to the MMU so the instruction in the MEM stage sees the updated permission bits immediately. Without this, the first user memory access after `csrs sstatus, SUM` would fault.
-
 ### Pipeline Stall Hierarchy
 
 ```
 Reset -> Pipeline Flush -> MMU/Div Stall (frozen) -> Data Hazard Stall -> Normal
 ```
 
-MMU stalls (page table walks, division) freeze the entire pipeline. Data hazard stalls (load-use, CSR-use) insert a bubble in ID/EX while letting later stages drain.
+MMU stalls (page table walks, division) freeze the entire pipeline. Data hazard stalls (load-use, CSR-use) insert a bubble in ID/EX while letting later stages drain. Getting the priority right between these was critical -- a flush during an MMU stall must be deferred, not dropped.
+
+### Iterative Divider
+
+Division uses a 32-cycle restoring algorithm in `div_unit.v`. The divider stalls the pipeline via `div_stall` merged into the MMU stall signal. Special cases (divide-by-zero, signed overflow MIN_INT/-1) resolve in a single cycle per the RISC-V spec.
+
+### MPRV (Modify Privilege)
+
+When MPRV=1 in mstatus, M-mode data accesses use the privilege level in MPP instead of M-mode. This is how OpenSBI accesses S-mode memory on behalf of the kernel. The forwarding path must also cover MPRV/MPP bits, not just SUM/MXR, to avoid a 1-cycle window where the wrong privilege is used.
+
+---
+
+## Future Work
+
+- **FPGA validation**: The design targets the Arty S7-25 and has synthesis scripts, but hasn't been tested on hardware yet. The 25K-LUT budget is tight; the current distributed-RAM approach may need to move to BRAM with registered reads.
+- **Branch prediction**: The current design flushes on every taken branch (MEM-stage resolution). Even a simple BTB or static predict-backward scheme would measurably reduce CPI.
+- **Instruction cache**: Currently all memory is single-cycle combinational. An I-cache with BRAM backing would enable higher clock frequencies on FPGA.
+- **Multi-hart**: The CLINT and PLIC already support multi-hart structures, but the CPU is single-hart. Adding a second hart would exercise the atomic unit and enable true SMP Linux.
 
 ---
 
