@@ -149,10 +149,16 @@ module soc #(
         for (i = 0; i < RAM_SIZE/4; i = i + 1) begin
             ram[i] = 32'h00000000;  // Zero - required for .bss
         end
-        `endif
         if (RAM_INIT_FILE != "") begin
             $readmemh(RAM_INIT_FILE, ram);
         end
+        `else
+        // Synthesis: provide a firmware_init.vh with ram[N] = 32'hXXXXXXXX assignments
+        // or set RAM_INIT_FILE parameter for $readmemh
+        if (RAM_INIT_FILE != "") begin
+            $readmemh(RAM_INIT_FILE, ram);
+        end
+        `endif
     end
     
     // Instruction read (port A) - always read

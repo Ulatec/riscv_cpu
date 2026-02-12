@@ -304,17 +304,13 @@ earlycon=ns16550,mmio32,0x10000000,115200n8 console=ttyS0,115200n8 loglevel=8 lp
 
 ---
 
-## FPGA
+## FPGA Synthesis Support
 
-The design includes synthesis support for the **Digilent Arty S7-25** (Spartan-7 XC7S25):
+The design is synthesis-ready:
 
 - `ifdef SIMULATION` / `ifndef SYNTHESIS` guards on all simulation constructs
 - Hardware UART TX/RX serializer (baud rate generator + shift registers)
-- MMCM clock generation (100MHz -> 20MHz)
 - 32-cycle iterative divider (replaces combinational div for timing closure)
-- Bare-metal UART echo firmware for hardware bring-up
-
-See `src/fpga_soc_wrapper.v`, `constr/board_arty_s7.xdc`, and `fpga/build.tcl`.
 
 ---
 
@@ -340,7 +336,7 @@ When MPRV=1 in mstatus, M-mode data accesses use the privilege level in MPP inst
 
 ## Future Work
 
-- **FPGA validation**: The design targets the Arty S7-25 and has synthesis scripts, but hasn't been tested on hardware yet. The 25K-LUT budget is tight; the current distributed-RAM approach may need to move to BRAM with registered reads.
+- **FPGA validation**: The design is synthesis-ready with simulation/synthesis guards, but needs a board-specific wrapper, constraints, and clock/memory configuration for any target FPGA.
 - **Branch prediction**: The current design flushes on every taken branch (MEM-stage resolution). Even a simple BTB or static predict-backward scheme would measurably reduce CPI.
 - **Instruction cache**: Currently all memory is single-cycle combinational. An I-cache with BRAM backing would enable higher clock frequencies on FPGA.
 - **Multi-hart**: The CLINT and PLIC already support multi-hart structures, but the CPU is single-hart. Adding a second hart would exercise the atomic unit and enable true SMP Linux.
