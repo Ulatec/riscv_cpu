@@ -182,6 +182,7 @@ module uart #(
     reg [7:0]  tx_shift;
     reg [2:0]  tx_bit_cnt;
     reg [19:0] tx_baud_cnt;
+    reg [7:0]  sim_tx_byte;  // Saved byte for sim output in HW TX mode
 
     // RX state machine
     localparam RX_IDLE  = 2'd0;
@@ -221,6 +222,7 @@ module uart #(
             
             sim_tx_valid <= 1'b0;
             sim_tx_data <= 8'h0;
+            sim_tx_byte <= 8'h0;
             tx_out <= 1'b1;
             tx_state <= TX_IDLE;
             tx_shift <= 8'h0;
@@ -303,8 +305,8 @@ module uart #(
             // =====================================================
             // TX: Transmit from FIFO
             // =====================================================
-            `ifdef SIMULATION
-            // Simulation: instant single-cycle transmit
+            `ifdef FAST_UART
+            // Fast simulation: instant single-cycle transmit
             if (!tx_fifo_empty && !(do_write && reg_addr == 3'd0 && !dlab)) begin
                 sim_tx_data <= tx_fifo[tx_head];
                 sim_tx_valid <= 1'b1;
@@ -315,6 +317,7 @@ module uart #(
             // Hardware: TX shift register pulls from FIFO when idle
             if (tx_state == TX_IDLE && !tx_fifo_empty && !(do_write && reg_addr == 3'd0 && !dlab)) begin
                 tx_shift <= tx_fifo[tx_head];
+                sim_tx_byte <= tx_fifo[tx_head];
                 tx_head <= (tx_head + 1) % FIFO_DEPTH;
                 tx_count <= tx_count - 1;
                 tx_state <= TX_START;
@@ -326,7 +329,7 @@ module uart #(
             // =====================================================
             // RX: Receive into FIFO
             // =====================================================
-            `ifdef SIMULATION
+            `ifdef FAST_UART
             if (sim_rx_valid) begin
                 if (!rx_fifo_full) begin
                     rx_fifo[rx_tail] <= sim_rx_data;
@@ -350,9 +353,9 @@ module uart #(
             `endif
 
             // =====================================================
-            // TX State Machine (synthesis only)
+            // TX State Machine (HW baud-rate timing)
             // =====================================================
-            `ifndef SIMULATION
+            `ifndef FAST_UART
             case (tx_state)
                 TX_START: begin
                     // Send start bit (low) for one baud period
@@ -384,6 +387,8 @@ module uart #(
                     if (tx_baud_cnt >= baud_full) begin
                         tx_baud_cnt <= 0;
                         tx_state <= TX_IDLE;
+                        sim_tx_data <= sim_tx_byte;
+                        sim_tx_valid <= 1'b1;
                     end else begin
                         tx_baud_cnt <= tx_baud_cnt + 1;
                     end
@@ -397,9 +402,9 @@ module uart #(
     end
 
     // =========================================================================
-    // Hardware RX (synthesis only)
+    // Hardware RX (when not using fast UART)
     // =========================================================================
-    `ifndef SIMULATION
+    `ifndef FAST_UART
 
     // Baud tick counts
     // Full period = 16 * divisor clock cycles per bit
@@ -481,6 +486,6 @@ module uart #(
         end
     end
 
-    `endif // SIMULATION
+    `endif // FAST_UART
 
 endmodule

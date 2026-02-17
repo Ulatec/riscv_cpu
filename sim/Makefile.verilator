@@ -11,11 +11,14 @@ SIM_BIN     = $(OBJ_DIR)/Vsoc
 VFLAGS  = --cc --exe --build
 VFLAGS += --top-module $(TOP_MODULE)
 VFLAGS += -O3
-VFLAGS += --x-assign fast --x-initial fast
+VFLAGS += --x-assign 0 --x-initial 0
 VFLAGS += -Wno-fatal
 VFLAGS += --public-flat-rw
 VFLAGS += -I../src
 VFLAGS += -GRAM_SIZE=32\'h2400000
+VFLAGS += -DSIMULATION
+# Note: FAST_UART is intentionally NOT defined — use HW UART timing
+# to match iverilog behavior (prevents timer-dependent boot divergence)
 
 # Compiler optimization
 VFLAGS += -CFLAGS "-O2"

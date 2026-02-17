@@ -64,7 +64,10 @@ module csr_file (
     input         retire_inst,
 
     // Timer from CLINT (for TIME CSR)
-    input  [63:0] mtime           // Current mtime value from CLINT
+    input  [63:0] mtime,          // Current mtime value from CLINT
+
+    // Illegal CSR detection
+    output reg    csr_addr_valid   // 1 if csr_addr is a known/implemented CSR
 );
 
     // =========================================================================
@@ -215,6 +218,19 @@ module csr_file (
     reg [31:0] scounteren; // Counter access for U-mode
     reg [31:0] mcounteren; // Counter access for S-mode (M-mode enables)
 
+    // mcountinhibit
+    reg [31:0] mcountinhibit_reg;
+
+    // smcntrpmf extension: counter config registers
+    reg [31:0] mcyclecfg_reg;
+    reg [31:0] mcyclecfgh_reg;
+    reg [31:0] minstretcfg_reg;
+    reg [31:0] minstretcfgh_reg;
+
+    // Debug trigger CSRs (sdtrig extension)
+    reg [31:0] tselect_reg;
+    reg [31:0] tdata1_reg;
+
     // =========================================================================
     // Interrupt Logic
     // =========================================================================
@@ -225,6 +241,9 @@ module csr_file (
     reg        mip_stip_sw;  // Software-writable STIP
     reg        mip_ssip;     // Software interrupt pending (S-mode)
 
+    // STIP always comes from software (MIP write by OpenSBI SBI timer relay)
+    wire stip_effective = mip_stip_sw;
+
     wire [31:0] mip = {
         20'b0,
         external_irq,    // MEIP (11) - from PLIC
@@ -233,7 +252,7 @@ module csr_file (
         1'b0,
         timer_irq,       // MTIP (7) - from CLINT
         1'b0,
-        mip_stip_sw,     // STIP (5) - software only for S-mode timer
+        stip_effective,  // STIP (5) - from software (MIP write by OpenSBI)
         1'b0,
         software_irq,    // MSIP (3) - from CLINT (if implemented)
         1'b0,
@@ -329,8 +348,9 @@ module csr_file (
             cycle_counter <= 64'b0;
             instret_counter <= 64'b0;
         end else begin
-            cycle_counter <= cycle_counter + 1;
-            if (retire_inst)
+            if (!mcountinhibit_reg[0])  // CY bit
+                cycle_counter <= cycle_counter + 1;
+            if (retire_inst && !mcountinhibit_reg[2])  // IR bit
                 instret_counter <= instret_counter + 1;
         end
     end
@@ -341,49 +361,68 @@ module csr_file (
 
     always @(*) begin
         csr_rdata = 32'h0;
+        csr_addr_valid = 1'b0;  // Default: unimplemented CSR → illegal instruction
 
         case (csr_addr)
             // Machine-mode CSRs
-            MSTATUS:    csr_rdata = mstatus;
-            MISA:       csr_rdata = misa;
-            MEDELEG:    csr_rdata = medeleg;
-            MIDELEG:    csr_rdata = mideleg;
-            MIE:        csr_rdata = mie;
-            MTVEC:      csr_rdata = mtvec;
-            MSCRATCH:   csr_rdata = mscratch;
-            MEPC:       csr_rdata = mepc;
-            MCAUSE:     csr_rdata = mcause;
-            MTVAL:      csr_rdata = mtval;
-            MIP:        csr_rdata = mip;
-            MCOUNTEREN: csr_rdata = mcounteren;
+            MSTATUS:    begin csr_rdata = mstatus;                 csr_addr_valid = 1'b1; end
+            MISA:       begin csr_rdata = misa;                    csr_addr_valid = 1'b1; end
+            MEDELEG:    begin csr_rdata = medeleg;                 csr_addr_valid = 1'b1; end
+            MIDELEG:    begin csr_rdata = mideleg;                 csr_addr_valid = 1'b1; end
+            MIE:        begin csr_rdata = mie;                     csr_addr_valid = 1'b1; end
+            MTVEC:      begin csr_rdata = mtvec;                   csr_addr_valid = 1'b1; end
+            MSCRATCH:   begin csr_rdata = mscratch;                csr_addr_valid = 1'b1; end
+            MEPC:       begin csr_rdata = mepc;                    csr_addr_valid = 1'b1; end
+            MCAUSE:     begin csr_rdata = mcause;                  csr_addr_valid = 1'b1; end
+            MTVAL:      begin csr_rdata = mtval;                   csr_addr_valid = 1'b1; end
+            MIP:        begin csr_rdata = mip;                     csr_addr_valid = 1'b1; end
+            MCOUNTEREN: begin csr_rdata = mcounteren;              csr_addr_valid = 1'b1; end
+            // mcountinhibit + smcntrpmf extension
+            12'h320:    begin csr_rdata = mcountinhibit_reg;       csr_addr_valid = 1'b1; end  // mcountinhibit
+            12'h321:    begin csr_rdata = mcyclecfg_reg;           csr_addr_valid = 1'b1; end  // mcyclecfg
+            12'h721:    begin csr_rdata = mcyclecfgh_reg;          csr_addr_valid = 1'b1; end  // mcyclecfgh
+            12'h322:    begin csr_rdata = minstretcfg_reg;         csr_addr_valid = 1'b1; end  // minstretcfg
+            12'h722:    begin csr_rdata = minstretcfgh_reg;        csr_addr_valid = 1'b1; end  // minstretcfgh
+            // mstatush: upper 32 bits of mstatus for RV32 (MBE=0, little-endian)
+            // Accessed directly by OpenSBI early boot before mtvec is set up
+            12'h310:    begin csr_rdata = 32'h0;                   csr_addr_valid = 1'b1; end  // mstatush
 
             // Machine info (read-only)
-            MVENDORID:  csr_rdata = 32'h0;
-            MARCHID:    csr_rdata = 32'h0;
-            MIMPID:     csr_rdata = 32'h0;
-            MHARTID:    csr_rdata = 32'h0;
+            MVENDORID:  begin csr_rdata = 32'h0;                   csr_addr_valid = 1'b1; end
+            MARCHID:    begin csr_rdata = 32'h0;                   csr_addr_valid = 1'b1; end
+            MIMPID:     begin csr_rdata = 32'h0;                   csr_addr_valid = 1'b1; end
+            MHARTID:    begin csr_rdata = 32'h0;                   csr_addr_valid = 1'b1; end
 
             // Supervisor-mode CSRs
-            SSTATUS:    csr_rdata = sstatus;
-            SIE:        csr_rdata = sie;
-            STVEC:      csr_rdata = stvec;
-            SCOUNTEREN: csr_rdata = scounteren;
-            SSCRATCH:   csr_rdata = sscratch;
-            SEPC:       csr_rdata = sepc;
-            SCAUSE:     csr_rdata = scause;
-            STVAL:      csr_rdata = stval;
-            SIP:        csr_rdata = sip;
-            SATP:       csr_rdata = satp;
+            SSTATUS:    begin csr_rdata = sstatus;                 csr_addr_valid = 1'b1; end
+            SIE:        begin csr_rdata = sie;                     csr_addr_valid = 1'b1; end
+            STVEC:      begin csr_rdata = stvec;                   csr_addr_valid = 1'b1; end
+            SCOUNTEREN: begin csr_rdata = scounteren;              csr_addr_valid = 1'b1; end
+            SSCRATCH:   begin csr_rdata = sscratch;                csr_addr_valid = 1'b1; end
+            SEPC:       begin csr_rdata = sepc;                    csr_addr_valid = 1'b1; end
+            SCAUSE:     begin csr_rdata = scause;                  csr_addr_valid = 1'b1; end
+            STVAL:      begin csr_rdata = stval;                   csr_addr_valid = 1'b1; end
+            SIP:        begin csr_rdata = sip;                     csr_addr_valid = 1'b1; end
+            SATP:       begin csr_rdata = satp;                    csr_addr_valid = 1'b1; end
+            // Debug trigger CSRs (sdtrig extension)
+            12'h7A0:    begin csr_rdata = tselect_reg;             csr_addr_valid = 1'b1; end  // tselect
+            12'h7A1:    begin csr_rdata = tdata1_reg;              csr_addr_valid = 1'b1; end  // tdata1
+
+            // Machine info (read-only, priv v1.12)
+            12'hF15:    begin csr_rdata = 32'h0;                   csr_addr_valid = 1'b1; end  // mconfigptr
 
             // Performance counters
-            CYCLE:      csr_rdata = cycle_counter[31:0];
-            CYCLEH:     csr_rdata = cycle_counter[63:32];
-            TIME:       csr_rdata = mtime[31:0];   // From CLINT
-            TIMEH:      csr_rdata = mtime[63:32];  // From CLINT
-            INSTRET:    csr_rdata = instret_counter[31:0];
-            INSTRETH:   csr_rdata = instret_counter[63:32];
+            CYCLE:      begin csr_rdata = cycle_counter[31:0];     csr_addr_valid = 1'b1; end
+            CYCLEH:     begin csr_rdata = cycle_counter[63:32];    csr_addr_valid = 1'b1; end
+            TIME:       begin csr_rdata = mtime[31:0];             csr_addr_valid = 1'b1; end  // From CLINT
+            TIMEH:      begin csr_rdata = mtime[63:32];            csr_addr_valid = 1'b1; end  // From CLINT
+            INSTRET:    begin csr_rdata = instret_counter[31:0];   csr_addr_valid = 1'b1; end
+            INSTRETH:   begin csr_rdata = instret_counter[63:32];  csr_addr_valid = 1'b1; end
 
-            default:    csr_rdata = 32'h0;
+            default: begin
+                csr_rdata = 32'h0;
+                // csr_addr_valid stays 0 → illegal instruction trap
+            end
         endcase
     end
 
@@ -428,12 +467,90 @@ module csr_file (
             mip_stip_sw <= 1'b0;
             mip_ssip    <= 1'b0;
 
+            // smcntrpmf / sdtrig
+            mcountinhibit_reg <= 32'h0;
+            mcyclecfg_reg     <= 32'h0;
+            mcyclecfgh_reg    <= 32'h0;
+            minstretcfg_reg   <= 32'h0;
+            minstretcfgh_reg  <= 32'h0;
+            tselect_reg   <= 32'h0;
+            tdata1_reg    <= 32'h0;
+
             // Start in M-mode
             priv_level <= PRIV_M;
 
         end else begin
             // =================================================================
-            // Trap Entry (highest priority)
+            // CSR Writes - FIRST so trap entry can override conflicting bits
+            // (Verilog last-NBA-wins: trap entry below overrides any conflicting
+            //  CSR write effects, but non-conflicting CSR writes are preserved)
+            // =================================================================
+            if (csr_write) begin
+                case (csr_waddr)
+                    // Machine-mode CSRs
+                    MSTATUS: begin
+                        mstatus_mie  <= csr_wdata[3];
+                        mstatus_mpie <= csr_wdata[7];
+                        mstatus_mpp  <= csr_wdata[12:11];
+                        mstatus_sie  <= csr_wdata[1];
+                        mstatus_spie <= csr_wdata[5];
+                        mstatus_spp  <= csr_wdata[8];
+                        mstatus_mxr_reg <= csr_wdata[19];
+                        mstatus_sum_reg <= csr_wdata[18];
+                        mstatus_mprv <= csr_wdata[17];
+                    end
+                    MIE:      mie <= csr_wdata & 32'hAAA;  // Only valid bits
+                    MTVEC:    mtvec <= {csr_wdata[31:2], 2'b0};  // Align to 4
+                    MSCRATCH: mscratch <= csr_wdata;
+                    MEPC:     mepc <= {csr_wdata[31:1], 1'b0};  // Align to 2 (IALIGN=16 for C ext)
+                    MCAUSE:   mcause <= csr_wdata;
+                    MTVAL:    mtval <= csr_wdata;
+                    MEDELEG:  medeleg <= csr_wdata & 32'h0000B3FF;  // Valid exception bits
+                    MIDELEG:  mideleg <= csr_wdata & 32'h222;       // Only S-mode ints delegatable
+                    MIP: begin
+                        // Only some bits are writable
+                        mip_seip_sw <= csr_wdata[9];
+                        mip_stip_sw <= csr_wdata[5];
+                        mip_ssip    <= csr_wdata[1];
+                    end
+                    MCOUNTEREN: mcounteren <= csr_wdata & 32'h7;  // Only CY, TM, IR bits
+                    12'h320:   mcountinhibit_reg <= csr_wdata & 32'h7; // mcountinhibit (CY, TM, IR)
+                    12'h321:   mcyclecfg_reg <= csr_wdata;             // mcyclecfg
+                    12'h721:   mcyclecfgh_reg <= csr_wdata;            // mcyclecfgh
+                    12'h322:   minstretcfg_reg <= csr_wdata;           // minstretcfg
+                    12'h722:   minstretcfgh_reg <= csr_wdata;          // minstretcfgh
+
+                    // Supervisor-mode CSRs
+                    SSTATUS: begin
+                        // sstatus writes affect mstatus S-mode bits
+                        mstatus_sie  <= csr_wdata[1];
+                        mstatus_spie <= csr_wdata[5];
+                        mstatus_spp  <= csr_wdata[8];
+                        mstatus_mxr_reg <= csr_wdata[19];
+                        mstatus_sum_reg <= csr_wdata[18];
+                    end
+                    SIE:       mie <= (mie & ~32'h222) | (csr_wdata & 32'h222);
+                    STVEC:     stvec <= {csr_wdata[31:2], 2'b0};
+                    SCOUNTEREN: scounteren <= csr_wdata;
+                    SSCRATCH:  sscratch <= csr_wdata;
+                    SEPC:      sepc <= {csr_wdata[31:1], 1'b0};  // Align to 2 (IALIGN=16 for C ext)
+                    SCAUSE:    scause <= csr_wdata;
+                    STVAL:     stval <= csr_wdata;
+                    SIP: begin
+                        // Only SSIP is writable via SIP
+                        mip_ssip <= csr_wdata[1];
+                    end
+                    SATP:      satp <= csr_wdata;
+                    // Debug trigger CSRs
+                    12'h7A0:   tselect_reg <= csr_wdata;              // tselect
+                    12'h7A1:   tdata1_reg <= csr_wdata;               // tdata1
+
+                    default: ;  // Ignore writes to unknown/read-only CSRs
+                endcase
+            end
+
+            // =================================================================
+            // Trap Entry (overrides conflicting CSR writes via last-NBA-wins)
             // =================================================================
             if (trap_taken) begin
                 if (trap_to_s_mode) begin
@@ -505,65 +622,6 @@ module csr_file (
                 // SPP is never M, so always clear MPRV on SRET
                 mstatus_mprv <= 1'b0;
             end
-
-            // =================================================================
-            // CSR Writes (lower priority than traps/returns)
-            // =================================================================
-            else if (csr_write) begin
-                case (csr_waddr)
-                    // Machine-mode CSRs
-                    MSTATUS: begin
-                        mstatus_mie  <= csr_wdata[3];
-                        mstatus_mpie <= csr_wdata[7];
-                        mstatus_mpp  <= csr_wdata[12:11];
-                        mstatus_sie  <= csr_wdata[1];
-                        mstatus_spie <= csr_wdata[5];
-                        mstatus_spp  <= csr_wdata[8];
-                        mstatus_mxr_reg <= csr_wdata[19];
-                        mstatus_sum_reg <= csr_wdata[18];
-                        mstatus_mprv <= csr_wdata[17];
-                    end
-                    MIE:      mie <= csr_wdata & 32'hAAA;  // Only valid bits
-                    MTVEC:    mtvec <= {csr_wdata[31:2], 2'b0};  // Align to 4
-                    MSCRATCH: mscratch <= csr_wdata;
-                    MEPC:     mepc <= {csr_wdata[31:2], 2'b0};  // Align to 4
-                    MCAUSE:   mcause <= csr_wdata;
-                    MTVAL:    mtval <= csr_wdata;
-                    MEDELEG:  medeleg <= csr_wdata & 32'h0000B3FF;  // Valid exception bits
-                    MIDELEG:  mideleg <= csr_wdata & 32'h222;       // Only S-mode ints delegatable
-                    MIP: begin
-                        // Only some bits are writable
-                        mip_seip_sw <= csr_wdata[9];
-                        mip_stip_sw <= csr_wdata[5];
-                        mip_ssip    <= csr_wdata[1];
-                    end
-                    MCOUNTEREN: mcounteren <= csr_wdata & 32'h7;  // Only CY, TM, IR bits
-
-                    // Supervisor-mode CSRs
-                    SSTATUS: begin
-                        // sstatus writes affect mstatus S-mode bits
-                        mstatus_sie  <= csr_wdata[1];
-                        mstatus_spie <= csr_wdata[5];
-                        mstatus_spp  <= csr_wdata[8];
-                        mstatus_mxr_reg <= csr_wdata[19];
-                        mstatus_sum_reg <= csr_wdata[18];
-                    end
-                    SIE:       mie <= (mie & ~32'h222) | (csr_wdata & 32'h222);
-                    STVEC:     stvec <= {csr_wdata[31:2], 2'b0};
-                    SCOUNTEREN: scounteren <= csr_wdata;
-                    SSCRATCH:  sscratch <= csr_wdata;
-                    SEPC:      sepc <= {csr_wdata[31:2], 2'b0};
-                    SCAUSE:    scause <= csr_wdata;
-                    STVAL:     stval <= csr_wdata;
-                    SIP: begin
-                        // Only SSIP is writable via SIP
-                        mip_ssip <= csr_wdata[1];
-                    end
-                    SATP:      satp <= csr_wdata;
-
-                    default: ;  // Ignore writes to unknown/read-only CSRs
-                endcase
-            end
         end
     end
 
@@ -604,6 +662,14 @@ module csr_file (
         mip_seip_sw = 1'b0;
         mip_stip_sw = 1'b0;
         mip_ssip    = 1'b0;
+
+        mcountinhibit_reg = 32'h0;
+        mcyclecfg_reg     = 32'h0;
+        mcyclecfgh_reg    = 32'h0;
+        minstretcfg_reg   = 32'h0;
+        minstretcfgh_reg  = 32'h0;
+        tselect_reg   = 32'h0;
+        tdata1_reg    = 32'h0;
 
         priv_level = PRIV_M;
     end

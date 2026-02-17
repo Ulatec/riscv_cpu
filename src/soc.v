@@ -140,13 +140,21 @@ module soc #(
     
     // RAM array
     // Distributed RAM (LUT RAM) — combinational reads are incompatible with BRAM
-    (* ram_style = "distributed" *) reg [31:0] ram [0:(RAM_SIZE/4)-1];
-    
+    // In simulation, pad to power-of-2 to prevent out-of-bounds array access.
+    // RAM_AW may address more entries than RAM_SIZE/4 for non-power-of-2 sizes;
+    // 2-state simulators compile reg arrays to C++ arrays where OOB is UB.
+    `ifdef SIMULATION
+    localparam RAM_ALLOC = (1 << RAM_AW);
+    `else
+    localparam RAM_ALLOC = (RAM_SIZE / 4);
+    `endif
+    (* ram_style = "distributed" *) reg [31:0] ram [0:RAM_ALLOC-1];
+
     // Initialize RAM
     integer i;
     initial begin
         `ifdef SIMULATION
-        for (i = 0; i < RAM_SIZE/4; i = i + 1) begin
+        for (i = 0; i < RAM_ALLOC; i = i + 1) begin
             ram[i] = 32'h00000000;  // Zero - required for .bss
         end
         if (RAM_INIT_FILE != "") begin

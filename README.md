@@ -3,7 +3,7 @@
 
 A solo-built RISC-V RV32IMAC system-on-chip written entirely in Verilog. 5-stage pipeline, Sv32 MMU with hardware page table walker, M/S/U privilege modes, and CLINT/PLIC/UART peripherals. Boots unmodified OpenSBI, Linux 6.1.25, and runs an interactive BusyBox shell.
 
-~5,300 lines of Verilog | ~90 instructions | 31 CSRs | 17 source files
+~4,900 lines of Verilog | ~90 instructions | 40 CSRs | 17 source files
 
 ![ISA](https://img.shields.io/badge/ISA-RV32IMAC-blue)
 ![Linux](https://img.shields.io/badge/Boots-Linux%206.1.25-green)
@@ -13,7 +13,7 @@ A solo-built RISC-V RV32IMAC system-on-chip written entirely in Verilog. 5-stage
 
 ## Demo: Linux Boot to Shell
 
-The CPU boots OpenSBI firmware, then the Linux kernel, and reaches an interactive BusyBox shell where commands can be executed. Full boot takes ~144M cycles (~5 minutes in Verilator).
+The CPU boots OpenSBI firmware, then the Linux kernel, and reaches an interactive BusyBox shell where commands can be executed. Full boot takes ~158M cycles (~10 minutes in Verilator).
 
 ![Linux running on the CPU: /proc/cpuinfo shows rv32imac ISA and sv32 MMU](image.png)
 
@@ -104,13 +104,15 @@ Boot HART MEDELEG           : 0x0000b109
 - Branch resolution in MEM stage with full pipeline flush
 - Trap/interrupt detection in MEM stage
 
-### CSRs (31 registers)
+### CSRs (40 registers)
 
-Machine-mode (15): mstatus, misa, medeleg, mideleg, mie, mtvec, mcounteren, mscratch, mepc, mcause, mtval, mip, mvendorid, marchid, mhartid
+Machine-mode (15): mstatus, mstatush, misa, medeleg, mideleg, mie, mtvec, mcounteren, mscratch, mepc, mcause, mtval, mip, mvendorid, marchid, mhartid
 
 Supervisor-mode (10): sstatus, sie, stvec, scounteren, sscratch, sepc, scause, stval, sip, satp
 
 Counters (6): cycle/cycleh, time/timeh, instret/instreth
+
+Extensions (9): mcountinhibit, mcyclecfg/h, minstretcfg/h (Smcntrpmf), tselect, tdata1 (Sdtrig), mconfigptr
 
 ### Peripherals
 
@@ -160,11 +162,11 @@ Counters (6): cycle/cycleh, time/timeh, instret/instreth
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `src/cpu.v` | 1350 | Main 5-stage pipeline with forwarding, MMU integration, CSR forwarding |
+| `src/cpu.v` | 1413 | Main 5-stage pipeline with forwarding, MMU integration, CSR forwarding |
 | `src/control_unit.v` | 185 | Instruction decoder: RV32IMAC + system instructions |
 | `src/ALU.v` | 63 | 18 ALU operations (base + M extension) |
 | `src/div_unit.v` | 129 | 32-cycle iterative restoring divider |
-| `src/csr_file.v` | 612 | 31 CSR registers, M/S-mode trap handling, interrupt delegation |
+| `src/csr_file.v` | 678 | 40 CSR registers, M/S-mode trap handling, interrupt delegation |
 | `src/decompressor.v` | 370 | RVC 16-bit to 32-bit instruction expansion |
 | `src/reg_file.v` | 31 | 32-entry register file (x0 hardwired to 0) |
 | `src/definitions.v` | 17 | ALU opcode definitions |
@@ -181,8 +183,8 @@ Counters (6): cycle/cycleh, time/timeh, instret/instreth
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `src/soc.v` | 219 | Top-level SoC: RAM, MMIO routing, dual-port memory |
-| `src/uart.v` | 485 | 16550 UART with FIFOs and hardware TX/RX for FPGA |
+| `src/soc.v` | 233 | Top-level SoC: RAM, MMIO routing, dual-port memory |
+| `src/uart.v` | 490 | 16550 UART with FIFOs and hardware TX/RX for FPGA |
 | `src/clint.v` | 142 | CLINT timer unit |
 | `src/plic.v` | 245 | PLIC interrupt controller |
 | `src/atomic_unit.v` | 173 | LR/SC reservation tracking + AMO operations |
@@ -205,15 +207,27 @@ iverilog -o test -g2005 -DSIMULATION soc_tb.v
 vvp test
 ```
 
-### Linux Boot (Verilator)
+### Linux Boot (Verilator, recommended)
 
 ```bash
-# Build the Verilator model
+# Build the Verilator model (requires WSL or Linux with verilator installed)
 cd sim
 make -f Makefile.verilator
 
-# Run with interactive UART
+# Run — boots to shell in ~10 minutes
+./obj_dir/Vsoc
+
+# Or run with interactive UART (type commands after shell prompt)
 ./obj_dir/Vsoc -i
+```
+
+### Linux Boot (Icarus Verilog)
+
+```bash
+cd sim
+iverilog -o linux_shell_test -g2005 linux_shell_tb.v
+vvp linux_shell_test
+# Note: takes several hours (~5M cycles per 3-4 minutes)
 ```
 
 ### Build Linux Kernel + Initramfs (Docker)
@@ -263,6 +277,18 @@ Building a CPU that passes unit tests is straightforward. Getting one to boot a 
 **Problem**: When the MMU stalls the pipeline (during a page table walk), the CSR trap logic was still processing interrupts. This corrupted the SPP (supervisor previous privilege) bit because the trap handler would fire while the pipeline was frozen, overwriting state that the stalled instruction still needed.
 
 **Solution**: Gate all trap processing with `!mmu_stall`. The trap signal becomes `take_trap_effective = take_trap && !mmu_stall`, ensuring CSR state is only modified when the pipeline is actually flowing.
+
+### CSR Write vs. Trap Priority
+
+**Problem**: When a WB-stage CSR write and a MEM-stage trap occurred in the same cycle, the CSR write was silently dropped. The `if (trap_taken) ... else if (csr_write)` structure meant trap entry always won. This caused an infinite page fault loop: `csrs sstatus, SUM` (WB) + `lw` (MEM page fault) would repeatedly fault because SUM was never actually set.
+
+**Solution**: Use separate `if` blocks instead of `if/else if`. CSR writes execute first, then trap entry overwrites only the conflicting bits (sepc, scause, etc.). Verilog's last-nonblocking-assignment-wins semantics ensure correct priority while preserving non-conflicting write effects.
+
+### Store Page Fault Must Suppress Memory Write
+
+**Problem**: When a store instruction hit a read-only page, the MMU correctly raised a store page fault, but the write data still reached RAM in the same cycle. The `mem_wstrb` (write byte-enable) signal was not gated by the page fault detection, so the store was committed to memory before the trap could prevent it. This corrupted the `__stack_chk_guard` canary in BusyBox, causing a stack protector SIGSEGV.
+
+**Solution**: Add `&& !page_fault_data` to the `mem_wstrb` assignment. Faulting stores produce zero write strobes, matching real hardware behavior where a faulting store is never committed to memory.
 
 ---
 

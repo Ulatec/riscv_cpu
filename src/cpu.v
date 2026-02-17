@@ -113,6 +113,8 @@ module cpu(
     reg        id_ex_is_sc;
     reg        id_ex_is_amo;
     reg [4:0]  id_ex_amo_funct5;
+    // MMU
+    reg        id_ex_is_sfence_vma;
 
     // =========================================================================
     // EX/MEM Pipeline Registers
@@ -147,6 +149,7 @@ module cpu(
     reg [31:0] ex_mem_csr_rdata;
     reg        ex_mem_is_ecall;
     reg        ex_mem_is_ebreak;
+    reg        ex_mem_illegal_csr;
     // Atomic
     reg        ex_mem_is_lr;
     reg        ex_mem_is_sc;
@@ -360,7 +363,9 @@ module cpu(
     reg [2:0] ForwardB;
     reg [1:0] ForwardStore;
 
-    wire [31:0] forward_data_mem = ex_mem_alu_result;
+    wire [31:0] forward_data_mem = is_atomic_mem ? atomic_rd_data :
+                                     ex_mem_mem_read ? load_data_formatted :
+                                     ex_mem_alu_result;
     wire [31:0] forward_data_wb = write_data_to_reg;
 
     // =========================================================================
@@ -552,18 +557,38 @@ module cpu(
     wire [1:0] effective_data_priv = (current_priv == 2'b11 && fwd_mstatus_mprv) ?
                                       fwd_mstatus_mpp : current_priv;
 
+    // CSR-to-trap-vector forwarding: when WB stage writes mtvec/stvec, forward
+    // new value so MEM-stage trap uses the updated vector immediately.
+    // Critical for OpenSBI's csr_read_allowed() which swaps mtvec to a recovery
+    // handler then immediately probes a CSR in the next instruction.
+    wire fwd_mtvec_active = mem_wb_csr_write && (mem_wb_csr_addr == 12'h305);
+    wire fwd_stvec_active = mem_wb_csr_write && (mem_wb_csr_addr == 12'h105);
+    wire [31:0] fwd_trap_vector =
+        (fwd_mtvec_active && !trap_to_s_mode) ? mem_wb_csr_wdata :
+        (fwd_stvec_active &&  trap_to_s_mode) ? mem_wb_csr_wdata :
+        trap_vector;
+
     // Suppress wrong-path ifetch page faults when MEM stage has a redirect
     wire ifetch_fault_suppress = take_branch_condition || ex_mem_isJAL || ex_mem_isJALR ||
                                   ex_mem_is_mret || ex_mem_is_sret || ex_mem_is_sfence_vma ||
-                                  ex_mem_is_ecall || ex_mem_is_ebreak;
+                                  ex_mem_is_ecall || ex_mem_is_ebreak || ex_mem_illegal_csr ||
+                                  page_fault_data;
     wire effective_ifetch_fault = page_fault_ifetch && !ifetch_fault_suppress;
 
-    // Exception handling - includes page faults
+    // Exception handling - includes page faults and illegal CSR
     wire exception_taken = ex_mem_is_ecall || ex_mem_is_ebreak ||
+                           ex_mem_illegal_csr ||
                            effective_ifetch_fault || page_fault_data;
+
+    // MEM-stage instruction caused an exception — its WB register/CSR write must
+    // be suppressed. Excludes ifetch faults (MEM instruction is valid) and
+    // interrupts (MEM instruction should complete).
+    wire mem_insn_exception = page_fault_data || ex_mem_illegal_csr ||
+                              ex_mem_is_ecall || ex_mem_is_ebreak;
 
     wire [31:0] exception_cause =
         ex_mem_is_ebreak ? 32'd3 :
+        ex_mem_illegal_csr ? 32'd2 :                      // Illegal instruction (bad CSR)
         ex_mem_is_ecall  ? (priv_level == 2'b11 ? 32'd11 :
                             priv_level == 2'b01 ? 32'd9  : 32'd8) :
         page_fault_data && ex_mem_mem_write  ? 32'd15 :   // Store/AMO page fault
@@ -571,19 +596,35 @@ module cpu(
         effective_ifetch_fault               ? 32'd12 :   // Instruction page fault
         32'd0;
 
-    // Exception PC: faulting instruction address
-    // For ifetch page faults, the faulting PC is the current pc_reg
-    // For data faults/ecall/ebreak, it's the instruction in MEM stage
-    wire [31:0] exception_pc = effective_ifetch_fault ? pc_reg : ex_mem_pc;
+    // Exception PC: for ifetch page faults, pick the oldest valid pipeline PC
+    // to avoid losing instructions already in-flight in ID and EX stages.
+    // For data faults/ecall/ebreak, it's the instruction in MEM stage.
+    wire [31:0] ifetch_fault_resume_pc =
+        (id_ex_pc != 32'h0) ? id_ex_pc :
+        (if_id_pc != 32'h0) ? if_id_pc :
+        pc_reg;
+    wire [31:0] exception_pc = effective_ifetch_fault ? ifetch_fault_resume_pc : ex_mem_pc;
 
     // Trap value: faulting address for page faults
     wire [31:0] trap_val = page_fault_data    ? mmu_fault_vaddr :
                            effective_ifetch_fault ? pc_reg :
                            32'd0;
 
+    // Block interrupts when MEM stage has a redirect (branch/jump/sfence) because
+    // the EX/ID/IF pipeline stages contain wrong-path instructions whose PCs are
+    // not valid resume points. Let the redirect resolve; interrupt fires next cycle.
     wire can_take_interrupt = interrupt_pending && !exception_taken &&
-                              !ex_mem_is_mret && !ex_mem_is_sret;
-    wire [31:0] interrupt_pc = pc_reg;  // Save current PC for interrupt resume
+                              !ex_mem_is_mret && !ex_mem_is_sret &&
+                              !take_branch_condition && !ex_mem_isJAL &&
+                              !ex_mem_isJALR && !ex_mem_is_sfence_vma;
+    // Interrupt resume PC: oldest valid pipeline PC (EX > ID > IF).
+    // MEM-stage instruction completes (flows to WB), so first non-committed
+    // instruction is in EX stage. After pipeline flush, EX/ID may be bubbles
+    // (pc=0), so fall back through the pipeline stages.
+    wire [31:0] interrupt_pc =
+        (id_ex_pc != 32'h0) ? id_ex_pc :
+        (if_id_pc != 32'h0) ? if_id_pc :
+        pc_reg;
     wire take_trap = exception_taken || can_take_interrupt;
 
     // Gate trap taken to CSR file by !mmu_stall to prevent CSR corruption during stalls
@@ -630,8 +671,11 @@ module cpu(
         .cycle_count(cycle),
         .retire_inst(retire_inst),
         // Timer from CLINT
-        .mtime(clint_mtime)
+        .mtime(clint_mtime),
+        // Illegal CSR detection
+        .csr_addr_valid(csr_addr_valid)
     );
+    wire csr_addr_valid;
 
     // Current privilege level from CSR file
     assign current_priv = priv_level;
@@ -762,11 +806,13 @@ module cpu(
                        ex_mem_is_lr || ex_mem_is_sc || ex_mem_is_amo;
 
     // Memory write data/strobe - handle PTW writes, atomic operations, and normal stores
+    // Non-PTW writes are gated by !mmu_stall to prevent spurious writes during PTW
+    // gap cycles when ptw_mem_req=0 but pipeline is still stalled with stale data_paddr.
     wire normal_mem_write = ex_mem_mem_write && !is_atomic_mem;
     assign mem_wdata = ptw_mem_req   ? ptw_mem_wdata :
                        is_atomic_mem ? atomic_mem_wdata : aligned_store_data;
     assign mem_wstrb = ptw_mem_req ? (ptw_mem_write ? 4'b1111 : 4'b0000) :
-                       (normal_mem_write || atomic_do_mem_write) ?
+                       ((normal_mem_write || atomic_do_mem_write) && !mmu_stall && !page_fault_data) ?
                        (is_atomic_mem ? 4'b1111 : store_byte_enables) : 4'b0000;
 
     wire [31:0] instruction_from_mem = decompressed_instruction;
@@ -836,11 +882,12 @@ module cpu(
     // Next PC Logic
     // =========================================================================
     assign next_pc =
-        take_trap ? trap_vector :
+        take_trap ? fwd_trap_vector :
         (ex_mem_is_mret || ex_mem_is_sret) ? trap_return_pc :
         ex_mem_isJALR ? (ex_mem_alu_result & 32'hFFFFFFFE) :
         take_branch_condition ? ex_mem_branch_target :
         ex_mem_isJAL ? ex_mem_branch_target :
+        ex_mem_is_sfence_vma ? ex_mem_pcplus4 :
         pcplus_if;
 
     wire pipeline_flush = (take_trap || take_branch_condition ||
@@ -910,6 +957,7 @@ module cpu(
             id_ex_is_sc       <= 1'b0;
             id_ex_is_amo      <= 1'b0;
             id_ex_amo_funct5  <= 5'b0;
+            id_ex_is_sfence_vma <= 1'b0;
             // EX/MEM Reset
             ex_mem_alu_result <= 32'b0;
             ex_mem_pc         <= 32'b0;
@@ -940,6 +988,7 @@ module cpu(
             ex_mem_csr_rdata  <= 32'b0;
             ex_mem_is_ecall   <= 1'b0;
             ex_mem_is_ebreak  <= 1'b0;
+            ex_mem_illegal_csr <= 1'b0;
             ex_mem_is_lr      <= 1'b0;
             ex_mem_is_sc      <= 1'b0;
             ex_mem_is_amo     <= 1'b0;
@@ -1013,6 +1062,7 @@ module cpu(
             id_ex_is_sc       <= 1'b0;
             id_ex_is_amo      <= 1'b0;
             id_ex_amo_funct5  <= 5'b0;
+            id_ex_is_sfence_vma <= 1'b0;
 
             // Flush EX/MEM
             ex_mem_alu_result <= 32'b0;
@@ -1044,6 +1094,7 @@ module cpu(
             ex_mem_csr_rdata  <= 32'b0;
             ex_mem_is_ecall   <= 1'b0;
             ex_mem_is_ebreak  <= 1'b0;
+            ex_mem_illegal_csr <= 1'b0;
             ex_mem_is_lr      <= 1'b0;
             ex_mem_is_sc      <= 1'b0;
             ex_mem_is_amo     <= 1'b0;
@@ -1051,10 +1102,12 @@ module cpu(
             ex_mem_is_sfence_vma <= 1'b0;
 
             // MEM/WB continues - let the flushing instruction complete writeback
-            mem_wb_mem_data   <= mem_rdata;
+            // EXCEPT when the MEM-stage instruction itself caused the exception
+            // (page fault, illegal CSR, ecall, ebreak) — its results are invalid
+            mem_wb_mem_data   <= load_data_formatted;
             mem_wb_alu_result <= ex_mem_alu_result;
             mem_wb_rd_addr    <= ex_mem_rd_addr;
-            mem_wb_reg_write  <= ex_mem_reg_write;
+            mem_wb_reg_write  <= mem_insn_exception ? 1'b0 : ex_mem_reg_write;
             mem_wb_mem_to_reg <= ex_mem_mem_to_reg;
             mem_wb_pcplus4    <= ex_mem_pcplus4;
             mem_wb_isJAL      <= ex_mem_isJAL;
@@ -1062,7 +1115,7 @@ module cpu(
             mem_wb_csr_rdata  <= ex_mem_csr_rdata;
             mem_wb_csr_wdata  <= ex_mem_csr_wdata;
             mem_wb_csr_addr   <= ex_mem_csr_addr;
-            mem_wb_csr_write  <= ex_mem_csr_write;
+            mem_wb_csr_write  <= mem_insn_exception ? 1'b0 : ex_mem_csr_write;
             mem_wb_is_csr     <= ex_mem_is_csr;
             mem_wb_atomic_data <= atomic_rd_data;
             mem_wb_is_atomic  <= is_atomic_mem;
@@ -1088,7 +1141,13 @@ module cpu(
             // - Let EX/MEM and MEM/WB continue normally
             // =================================================================
 
-            // ID/EX gets a bubble - clear all control signals
+            // ID/EX gets a bubble - clear all control signals and PC
+            // Clearing id_ex_pc is critical: the instruction that was in EX has
+            // moved to MEM (will complete to WB). If an interrupt fires during
+            // the stall, interrupt_pc must NOT pick up this stale PC (which
+            // points to the already-completing instruction), or it would be
+            // re-executed on interrupt return.
+            id_ex_pc          <= 32'b0;
             id_ex_mem_read    <= 1'b0;
             id_ex_mem_write   <= 1'b0;
             id_ex_reg_write   <= 1'b0;
@@ -1104,6 +1163,7 @@ module cpu(
             id_ex_is_sc       <= 1'b0;
             id_ex_is_amo      <= 1'b0;
             id_ex_rd_addr     <= 5'b0;
+            id_ex_is_sfence_vma <= 1'b0;
 
             // EX/MEM continues normally
             ex_mem_alu_result <= effective_alu_result;
@@ -1133,13 +1193,14 @@ module cpu(
             ex_mem_csr_rdata  <= csr_rdata;
             ex_mem_is_ecall   <= id_ex_is_ecall;
             ex_mem_is_ebreak  <= id_ex_is_ebreak;
+            ex_mem_illegal_csr <= id_ex_is_csr && !csr_addr_valid;
             ex_mem_is_mret    <= id_ex_is_mret;
             ex_mem_is_sret    <= id_ex_is_sret;
             ex_mem_is_lr      <= id_ex_is_lr;
             ex_mem_is_sc      <= id_ex_is_sc;
             ex_mem_is_amo     <= id_ex_is_amo;
             ex_mem_amo_funct5 <= id_ex_amo_funct5;
-            ex_mem_is_sfence_vma <= is_sfence_vma_ctrl;
+            ex_mem_is_sfence_vma <= id_ex_is_sfence_vma;
 
             // MEM/WB continues normally
             mem_wb_mem_data   <= load_data_formatted;
@@ -1217,6 +1278,7 @@ module cpu(
                 id_ex_is_sc       <= is_sc_ctrl;
                 id_ex_is_amo      <= is_amo_ctrl;
                 id_ex_amo_funct5  <= amo_funct5_ctrl;
+                id_ex_is_sfence_vma <= is_sfence_vma_ctrl;
 
                 // --- EX/MEM ---
                 ex_mem_alu_result <= effective_alu_result;
@@ -1246,13 +1308,14 @@ module cpu(
                 ex_mem_csr_rdata  <= csr_rdata;
                 ex_mem_is_ecall   <= id_ex_is_ecall;
                 ex_mem_is_ebreak  <= id_ex_is_ebreak;
+                ex_mem_illegal_csr <= id_ex_is_csr && !csr_addr_valid;
                 ex_mem_is_mret    <= id_ex_is_mret;
                 ex_mem_is_sret    <= id_ex_is_sret;
                 ex_mem_is_lr      <= id_ex_is_lr;
                 ex_mem_is_sc      <= id_ex_is_sc;
                 ex_mem_is_amo     <= id_ex_is_amo;
                 ex_mem_amo_funct5 <= id_ex_amo_funct5;
-                ex_mem_is_sfence_vma <= is_sfence_vma_ctrl;
+                ex_mem_is_sfence_vma <= id_ex_is_sfence_vma;
 
                 // --- MEM/WB ---
                 mem_wb_mem_data   <= load_data_formatted;

@@ -192,6 +192,25 @@ module linux_shell_tb;
                 i = MAX_CYCLES;
             end
 
+            // ======== Register checksum for cross-simulator comparison ========
+            if (i > 0 && i % 100000 == 0 && i <= 10000000) begin : cksum_block
+                reg [31:0] rf_cksum;
+                integer r;
+                rf_cksum = 32'h0;
+                for (r = 1; r < 32; r = r + 1)
+                    rf_cksum = rf_cksum ^ dut.cpu_inst.reg_file_inst.regfile[r];
+                $display("CKSUM[%0d] pc=0x%08x rf=0x%08x mstatus=0x%08x mepc=0x%08x mcause=0x%08x satp=0x%08x priv=%0d mtime=0x%08x%08x",
+                    i, pc, rf_cksum,
+                    dut.cpu_inst.csr_file_inst.mstatus,
+                    dut.cpu_inst.csr_file_inst.mepc,
+                    dut.cpu_inst.csr_file_inst.mcause,
+                    dut.cpu_inst.csr_file_inst.satp,
+                    priv,
+                    dut.cpu_inst.clint_inst.mtime[63:32],
+                    dut.cpu_inst.clint_inst.mtime[31:0]);
+                $fflush();
+            end
+
             // ======== Progress report every 5M cycles ========
             if (i % 5_000_000 == 0 && i > 0) begin
                 $display("\n[%0dM] pc=0x%08x priv=%0d uart=%0d pgf=%0d",
