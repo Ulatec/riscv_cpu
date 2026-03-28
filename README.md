@@ -183,7 +183,7 @@ Extensions (9): mcountinhibit, mcyclecfg/h, minstretcfg/h (Smcntrpmf), tselect, 
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `src/soc.v` | 233 | Top-level SoC: RAM, MMIO routing, dual-port memory |
+| `src/soc.v` | 320 | Top-level SoC: RAM, MMIO routing, dual-port memory, configurable memory delay |
 | `src/uart.v` | 490 | 16550 UART with FIFOs and hardware TX/RX for FPGA |
 | `src/clint.v` | 142 | CLINT timer unit |
 | `src/plic.v` | 245 | PLIC interrupt controller |
@@ -330,13 +330,16 @@ earlycon=ns16550,mmio32,0x10000000,115200n8 console=ttyS0,115200n8 loglevel=8 lp
 
 ---
 
-## FPGA Synthesis Support
+## FPGA Implementation
 
-The design is synthesis-ready:
+The design runs on FPGA (tested on AUP-ZU3 / Zynq UltraScale+), booting OpenSBI and Linux:
 
-- `ifdef SIMULATION` / `ifndef SYNTHESIS` guards on all simulation constructs
-- Hardware UART TX/RX serializer (baud rate generator + shift registers)
-- 32-cycle iterative divider (replaces combinational div for timing closure)
+- `fpga/fpga_soc.v` — SoC variant that replaces distributed RAM with an AXI DDR4 bridge
+- `fpga/axi_mem_bridge.v` — Dual-port AXI4 bridge (instruction fetch + data access) with 1-word instruction cache, S_LAUNCH timing stage, AMO two-phase handling, and PTW port arbitration
+- `fpga/fpga_top.v` — Top-level wrapper for Zynq UltraScale+ PS8 block design
+- `fpga/boot_fpga.tcl` — XSCT boot script: PS init, bitstream load, firmware load, relocation patching, CPU release, UART monitoring
+
+Hardware UART TX/RX serializer (baud rate generator + shift registers) and 32-cycle iterative divider (replaces combinational div for timing closure) ensure synthesis compatibility. `ifdef SIMULATION` / `ifndef SYNTHESIS` guards protect all simulation-only constructs.
 
 ---
 
@@ -362,9 +365,9 @@ When MPRV=1 in mstatus, M-mode data accesses use the privilege level in MPP inst
 
 ## Future Work
 
-- **FPGA validation**: The design is synthesis-ready with simulation/synthesis guards, but needs a board-specific wrapper, constraints, and clock/memory configuration for any target FPGA.
 - **Branch prediction**: The current design flushes on every taken branch (MEM-stage resolution). Even a simple BTB or static predict-backward scheme would measurably reduce CPI.
-- **Instruction cache**: Currently all memory is single-cycle combinational. An I-cache with BRAM backing would enable higher clock frequencies on FPGA.
+- **Instruction cache**: The FPGA currently uses a 1-word instruction cache in the AXI bridge. A proper I-cache with BRAM backing would dramatically improve performance.
+- **Data cache**: Every load/store goes through AXI to DDR (~15 cycle latency). A write-back D-cache would be the single largest performance improvement.
 - **Multi-hart**: The CLINT and PLIC already support multi-hart structures, but the CPU is single-hart. Adding a second hart would exercise the atomic unit and enable true SMP Linux.
 
 ---
