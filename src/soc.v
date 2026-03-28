@@ -22,7 +22,9 @@
 
 module soc #(
     parameter RAM_SIZE = 32'h800000,      // 8MB default for Linux boot
-    parameter RAM_INIT_FILE = ""          // Optional memory init file
+    parameter RAM_INIT_FILE = "",         // Optional memory init file
+    parameter MTIME_PRESCALER = 1,        // mtime prescaler (1=every cycle)
+    parameter MEM_DELAY = 0              // 0=instant, >0=cycles per memory access
 ) (
     input         clk,
     input         rst,
@@ -51,7 +53,7 @@ module soc #(
     wire [31:0] mem_wdata;
     wire        mem_rstrb;
     wire [3:0]  mem_wstrb;
-    
+
     wire [31:0] cycle;
     
     // =========================================================================
@@ -177,8 +179,10 @@ module soc #(
     assign ram_dmem_rdata = ram[dmem_word_addr];
 
     // Data write with byte enables
+    // When MEM_DELAY > 0, gate writes by dmem_ready to prevent early commit
+    // (critical for AMO: read must see OLD value, not post-write value)
     always @(posedge clk) begin
-        if (ram_select && (mem_wstrb != 4'b0)) begin
+        if (ram_select && (mem_wstrb != 4'b0) && dmem_ready_w) begin
             if (mem_wstrb[0]) ram[dmem_word_addr][7:0]   <= mem_wdata[7:0];
             if (mem_wstrb[1]) ram[dmem_word_addr][15:8]  <= mem_wdata[15:8];
             if (mem_wstrb[2]) ram[dmem_word_addr][23:16] <= mem_wdata[23:16];
@@ -199,10 +203,94 @@ module soc #(
                        32'h0;
     
     // =========================================================================
+    // Memory Delay Logic (MEM_DELAY > 0 simulates AXI DDR latency)
+    // =========================================================================
+
+    // --- Instruction fetch delay (level-based, like bridge's imem cache) ---
+    reg [7:0]  imem_dly_cnt;
+    reg        imem_dly_ready;
+    reg [29:0] imem_dly_last_word_addr;
+
+    `ifdef SIMULATION
+    initial begin
+        imem_dly_cnt = 0;
+        imem_dly_ready = (MEM_DELAY == 0) ? 1'b1 : 1'b0;
+        imem_dly_last_word_addr = 30'h3FFFFFFF;
+    end
+    `endif
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            imem_dly_cnt          <= 0;
+            imem_dly_ready        <= 1'b0;
+            imem_dly_last_word_addr <= 30'h3FFFFFFF;
+        end else if (MEM_DELAY > 0) begin
+            if (imem_addr[31:2] != imem_dly_last_word_addr) begin
+                imem_dly_cnt          <= MEM_DELAY[7:0];
+                imem_dly_ready        <= 1'b0;
+                imem_dly_last_word_addr <= imem_addr[31:2];
+            end else if (imem_dly_cnt > 0) begin
+                imem_dly_cnt <= imem_dly_cnt - 8'd1;
+                if (imem_dly_cnt == 8'd1)
+                    imem_dly_ready <= 1'b1;
+            end
+        end
+    end
+
+    // --- Data access delay (pulse-based, like bridge's dmem_ready) ---
+    reg [7:0]  dmem_dly_cnt;
+    reg        dmem_dly_ready;
+    reg        dmem_dly_active;
+    reg        dmem_dly_suppress;
+
+    `ifdef SIMULATION
+    initial begin
+        dmem_dly_cnt = 0;
+        dmem_dly_ready = 0;
+        dmem_dly_active = 0;
+        dmem_dly_suppress = 0;
+    end
+    `endif
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            dmem_dly_cnt     <= 0;
+            dmem_dly_ready   <= 1'b0;
+            dmem_dly_active  <= 1'b0;
+            dmem_dly_suppress <= 1'b0;
+        end else if (MEM_DELAY > 0) begin
+            dmem_dly_ready   <= 1'b0;
+            dmem_dly_suppress <= 1'b0;
+
+            if (dmem_dly_active) begin
+                if (dmem_dly_cnt > 0) begin
+                    dmem_dly_cnt <= dmem_dly_cnt - 8'd1;
+                end else begin
+                    dmem_dly_ready  <= 1'b1;
+                    dmem_dly_active <= 1'b0;
+                    dmem_dly_suppress <= 1'b1;
+                end
+            end else if (!dmem_dly_suppress &&
+                         (mem_rstrb || (mem_wstrb != 4'b0))) begin
+                // Trigger for ANY data access (not just RAM/UART).
+                // Unmapped addresses still need dmem_ready to unstall the pipeline.
+                // CLINT/PLIC are excluded by mem_stall_data_ext, so the pulse is harmless.
+                dmem_dly_cnt    <= (MEM_DELAY > 1) ? (MEM_DELAY[7:0] - 8'd1) : 8'd0;
+                dmem_dly_active <= 1'b1;
+            end
+        end
+    end
+
+    wire imem_ready_w = (MEM_DELAY == 0) ? 1'b1 : imem_dly_ready;
+    wire dmem_ready_w = (MEM_DELAY == 0) ? 1'b1 : dmem_dly_ready;
+
+    // =========================================================================
     // CPU Instance
     // =========================================================================
-    
-    cpu cpu_inst (
+
+    cpu #(
+        .MTIME_PRESCALER(MTIME_PRESCALER)
+    ) cpu_inst (
         .clk(clk),
         .rst(rst),
 
@@ -210,6 +298,7 @@ module soc #(
         .imem_addr(imem_addr),
         .imem_rdata(imem_rdata),
         .imem_rstrb(imem_rstrb),
+        .imem_ready(imem_ready_w),
 
         // Data memory
         .mem_addr(mem_addr),
@@ -217,11 +306,27 @@ module soc #(
         .mem_wdata(mem_wdata),
         .mem_rstrb(mem_rstrb),
         .mem_wstrb(mem_wstrb),
+        .dmem_ready(dmem_ready_w),
 
         .cycle(cycle),
 
         // External interrupts: UART is IRQ source 1 (per DTS)
-        .external_irq_sources({30'b0, uart_irq, 1'b0})
+        .external_irq_sources({30'b0, uart_irq, 1'b0}),
+
+        // Debug outputs (unused in simulation)
+        .debug_priv(),
+        .debug_trap_fire(),
+        .debug_trap_cause(),
+        .debug_trap_pc(),
+        .debug_mtvec(),
+        .debug_mepc(),
+        .debug_stvec(),
+        .debug_sepc(),
+        .debug_scause(),
+        .debug_satp(),
+        .debug_vpc(),
+        .debug_mmu_state(),
+        .imem_addr_valid()
     );
     
     // =========================================================================
